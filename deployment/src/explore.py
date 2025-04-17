@@ -1,25 +1,17 @@
 #!/usr/bin/env python3
-"""explore_ros2.py – ROS 2 re‑implementation of the original ROS 1 exploration node.
 
-Last updated: 2025‑04‑17
-───────────────────────
-* **Fix**: use `self.model_params["len_traj_pred"]` instead of nonexistent
-  `self.model.len_traj_pred`.
-* Store `model_params` as an instance attribute so it is accessible from the
-  timer callback.
-* Minor linters & type hints.
-"""
 from __future__ import annotations
 
 import argparse
 import os
-import time
 from collections import deque
 from pathlib import Path
-from typing import Deque, List
+from typing import Deque
 
+import cv2
 import numpy as np
 import rclpy
+from cv_bridge import CvBridge
 from rclpy.node import Node
 from sensor_msgs.msg import Image
 from std_msgs.msg import Float32MultiArray
@@ -29,17 +21,10 @@ from diffusers.schedulers.scheduling_ddpm import DDPMScheduler
 
 from utils import msg_to_pil, to_numpy, transform_images, load_model
 from vint_train.training.train_utils import get_action
-from topic_names import (
-    IMAGE_TOPIC,
-    WAYPOINT_TOPIC,
-    SAMPLED_ACTIONS_TOPIC,
-)
+from topic_names import IMAGE_TOPIC, WAYPOINT_TOPIC, SAMPLED_ACTIONS_TOPIC
 
-# ---------------------------------------------------------------------------
-# CONSTANTS
-# ---------------------------------------------------------------------------
+# ------------------------------- CONSTANTS ----------------------------------
 THIS_DIR = Path(__file__).resolve().parent
-MODEL_WEIGHTS_PATH = THIS_DIR / "../model_weights"
 ROBOT_CONFIG_PATH = THIS_DIR / "../config/robot.yaml"
 MODEL_CONFIG_PATH = THIS_DIR / "../config/models.yaml"
 
@@ -48,6 +33,11 @@ with open(ROBOT_CONFIG_PATH, "r") as f:
 MAX_V = ROBOT_CONF["max_v"]
 MAX_W = ROBOT_CONF["max_w"]
 RATE = ROBOT_CONF["frame_rate"]  # Hz
+
+# Visualisation tuning -------------------------------------------------------
+PIXELS_PER_M = 3.0  # ↓ smaller → shorter drawn trajectories
+ORIGIN_Y_RATIO = 0.95  # 1.0 = very bottom, 0.0 = very top
+# ----------------------------------------------------------------------------
 
 
 def _load_model(model_name: str, device: torch.device):
@@ -64,26 +54,23 @@ def _load_model(model_name: str, device: torch.device):
 
     print(f"[INFO] Loading model from {ckpt_path}")
     model = load_model(ckpt_path, model_params, device)
-    model = model.to(device).eval()
-    return model, model_params
+    return model.to(device).eval(), model_params
 
 
 class ExplorationNode(Node):
-    """ROS 2 node that performs image‑conditioned waypoint sampling."""
+    """ROS 2 node: image‑conditioned waypoint sampling + visualisation."""
 
     def __init__(self, args: argparse.Namespace):
         super().__init__("exploration")
         self.args = args
 
-        # Torch device
+        # Torch / model ------------------------------------------------------
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.get_logger().info(f"Using device: {self.device}")
 
-        # Model & params
         self.model, self.model_params = _load_model(args.model, self.device)
         self.context_size: int = self.model_params["context_size"]
 
-        # Scheduler
         self.noise_scheduler = DDPMScheduler(
             num_train_timesteps=self.model_params["num_diffusion_iters"],
             beta_schedule="squaredcos_cap_v2",
@@ -91,57 +78,57 @@ class ExplorationNode(Node):
             prediction_type="epsilon",
         )
 
-        # Queues & state
+        # State & ROS‑interfaces --------------------------------------------
         self.context_queue: Deque[np.ndarray] = deque(maxlen=self.context_size + 1)
+        self.bridge = CvBridge()
 
-        # ROS interfaces
         self.create_subscription(Image, IMAGE_TOPIC, self._image_cb, 1)
         self.waypoint_pub = self.create_publisher(Float32MultiArray, WAYPOINT_TOPIC, 1)
         self.sampled_actions_pub = self.create_publisher(
             Float32MultiArray, SAMPLED_ACTIONS_TOPIC, 1
         )
+        self.viz_pub = self.create_publisher(Image, "trajectory_viz", 1)
 
         self.create_timer(1.0 / RATE, self._timer_cb)
         self.get_logger().info("Exploration node initialised. Waiting for images…")
 
-    # ---------------------------------------------------------------------
+    # ------------------------------------------------------------------
     # Callbacks
-    # ---------------------------------------------------------------------
+    # ------------------------------------------------------------------
 
     def _image_cb(self, msg: Image):
-        pil_img = msg_to_pil(msg)
-        self.context_queue.append(pil_img)
+        self.context_queue.append(msg_to_pil(msg))
 
     def _timer_cb(self):
         if len(self.context_queue) <= self.context_size:
             return  # not enough context yet
 
-        # -----------------------------------------------------------------
-        # 1. Pre‑process observations
+        # 1. Prepare tensors ------------------------------------------------
         obs_imgs = transform_images(
-            list(self.context_queue),
-            self.model_params["image_size"],
-            center_crop=False,
+            list(self.context_queue), self.model_params["image_size"], center_crop=False
         ).to(self.device)
-
-        fake_goal = torch.randn((1, 3, *self.model_params["image_size"]), device=self.device)
-        mask = torch.ones(1, device=self.device, dtype=torch.long)  # ignore goal
+        fake_goal = torch.randn(
+            (1, 3, *self.model_params["image_size"]), device=self.device
+        )
+        mask = torch.ones(1, device=self.device, dtype=torch.long)
 
         with torch.no_grad():
-            # Encode observations
             obs_cond = self.model(
-                "vision_encoder", obs_img=obs_imgs, goal_img=fake_goal, input_goal_mask=mask
+                "vision_encoder",
+                obs_img=obs_imgs,
+                goal_img=fake_goal,
+                input_goal_mask=mask,
             )
-            if obs_cond.ndim == 2:
-                obs_cond = obs_cond.repeat(self.args.num_samples, 1)
-            else:
-                obs_cond = obs_cond.repeat(self.args.num_samples, 1, 1)
+            rep_fn = (
+                (lambda x: x.repeat(self.args.num_samples, 1))
+                if obs_cond.ndim == 2
+                else (lambda x: x.repeat(self.args.num_samples, 1, 1))
+            )
+            obs_cond = rep_fn(obs_cond)
 
-            # -----------------------------------------------------------------
-            # 2. Diffusion sampling
-            len_traj_pred = self.model_params["len_traj_pred"]
+            len_traj = self.model_params["len_traj_pred"]
             naction = torch.randn(
-                (self.args.num_samples, len_traj_pred, 2), device=self.device
+                (self.args.num_samples, len_traj, 2), device=self.device
             )
             self.noise_scheduler.set_timesteps(self.model_params["num_diffusion_iters"])
             for k in self.noise_scheduler.timesteps:
@@ -150,31 +137,67 @@ class ExplorationNode(Node):
                 )
                 naction = self.noise_scheduler.step(noise_pred, k, naction).prev_sample
 
-        # -----------------------------------------------------------------
-        # 3. Post‑process & publish
+        # 2. Publish Float32MultiArray msgs ----------------------------------
         naction_np = to_numpy(get_action(naction))
+        self._publish_action_msgs(naction_np)
+
+        # 3. Publish visualisation image ------------------------------------
+        self._publish_viz_image(naction_np)
+
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
+
+    def _publish_action_msgs(self, traj_batch: np.ndarray):
         sampled_actions_msg = Float32MultiArray()
-        sampled_actions_msg.data = [0.0] + [float(x) for x in naction_np.flatten()]
+        sampled_actions_msg.data = [0.0] + [float(x) for x in traj_batch.flatten()]
         self.sampled_actions_pub.publish(sampled_actions_msg)
 
-        chosen_waypoint = naction_np[0][self.args.waypoint]
+        chosen = traj_batch[0][self.args.waypoint]
         if self.model_params.get("normalize", False):
-            chosen_waypoint *= (MAX_V / RATE)
+            chosen *= MAX_V / RATE
         waypoint_msg = Float32MultiArray()
-        waypoint_msg.data = [float(chosen_waypoint[0]), float(chosen_waypoint[1])]
+        waypoint_msg.data = [float(chosen[0]), float(chosen[1])]
         self.waypoint_pub.publish(waypoint_msg)
-        self.get_logger().debug("Published waypoint")
+
+    def _publish_viz_image(self, traj_batch: np.ndarray):
+        frame = np.array(self.context_queue[-1])  # latest RGB frame
+        img_h, img_w = frame.shape[:2]
+        viz = frame.copy()
+
+        cx = img_w // 2
+        cy = int(img_h * ORIGIN_Y_RATIO)
+
+        # Draw each trajectory
+        for i, traj in enumerate(traj_batch):
+            pts = []
+            acc_x, acc_y = 0.0, 0.0
+            for dx, dy in traj:
+                acc_x += dx
+                acc_y += dy
+                px = int(cx - dy * PIXELS_PER_M)
+                py = int(cy - acc_x * PIXELS_PER_M)
+                pts.append((px, py))
+
+            if len(pts) >= 2:
+                color = (0, 255, 0) if i == 0 else (255, 200, 0)
+                cv2.polylines(viz, [np.array(pts, dtype=np.int32)], False, color, 1)
+
+        img_msg = self.bridge.cv2_to_imgmsg(viz, encoding="rgb8")
+        img_msg.header.stamp = self.get_clock().now().to_msg()
+        self.viz_pub.publish(img_msg)
 
 
 # ---------------------------------------------------------------------------
 # ENTRY POINT
 # ---------------------------------------------------------------------------
 
+
 def main():
     parser = argparse.ArgumentParser("GNM‑Diffusion exploration (ROS 2)")
-    parser.add_argument("--model", "-m", default="nomad", help="Model key in YAML config")
-    parser.add_argument("--waypoint", "-w", type=int, default=2, help="Waypoint index")
-    parser.add_argument("--num-samples", "-n", type=int, default=8, help="# of samples")
+    parser.add_argument("--model", "-m", default="nomad")
+    parser.add_argument("--waypoint", "-w", type=int, default=2)
+    parser.add_argument("--num-samples", "-n", type=int, default=8)
     args = parser.parse_args()
 
     rclpy.init()
