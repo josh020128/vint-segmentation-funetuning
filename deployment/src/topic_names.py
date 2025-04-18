@@ -32,5 +32,6 @@ CHOSEN_SUBGOAL_TOPIC = "/chosen_subgoal"
 ODOM_TOPIC = "/odom"
 BUMPER_TOPIC = "/mobile_base/events/bumper"
 JOY_BUMPER_TOPIC = "/joy_bumper"
+TOPOMAP_IMAGES_DIR = "../topomaps/images"
 
 # move the robot

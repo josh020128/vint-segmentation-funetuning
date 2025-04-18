@@ -38,7 +38,7 @@ MAX_W = ROBOT_CONF["max_w"]
 RATE = ROBOT_CONF["frame_rate"]  # Hz
 
 # Visualisation -------------------------------------------------------------
-PIXELS_PER_M = 3.0  # px for 1 m (feel free to tune)
+PIXELS_PER_M = 40.0  # px for 1 m (feel free to tune)
 ORIGIN_Y_RATIO = 0.95  # where to anchor trajectories vertically
 
 # ---------------------------------------------------------------------------
@@ -103,10 +103,15 @@ class NavigationNode(Node):
         )
         self.goal_pub = self.create_publisher(Bool, "/topoplan/reached_goal", 1)
         self.viz_pub = self.create_publisher(Image, "navigation_viz", 1)
+        self.subgoal_pub = self.create_publisher(Image, "navigation_subgoal", 1)
+        self.goal_pub_img = self.create_publisher(Image, "navigation_goal", 1)
         self.create_timer(1.0 / RATE, self._timer_cb)
         self.get_logger().info("Navigation node initialised. Waiting for images…")
+        self.ctx_dt = 0.25
+        self.last_ctx_time = self.get_clock().now()
 
-    # ------------------------------------------------------------------
+        # ------------------------------------------------------------------
+
     # Helper: topomap
     # ------------------------------------------------------------------
 
@@ -122,7 +127,11 @@ class NavigationNode(Node):
     # ------------------------------------------------------------------
 
     def _image_cb(self, msg: Image):
+        now = self.get_clock().now()
+        if (now - self.last_ctx_time).nanoseconds < self.ctx_dt * 1e9:
+            return  # 아직 0.25 s 안 지났으면 무시
         self.context_queue.append(msg_to_pil(msg))
+        self.last_ctx_time = now
 
     def _timer_cb(self):
         if len(self.context_queue) <= self.context_size:
@@ -169,6 +178,9 @@ class NavigationNode(Node):
             len(goal_tensor) - 1,
         )
         obs_cond = obsgoal_cond[sg_idx].unsqueeze(0)
+        sg_global_idx = start + sg_idx  # ← 새로 추가
+        sg_pil = self.topomap[sg_global_idx]  # ← 새로 추가
+        goal_pil = self.topomap[self.goal_node]  # ← 새로 추가
 
         # -----------------------------------------------------------------
         # 2. Sample trajectories towards sub‑goal (diffusion)
@@ -197,6 +209,18 @@ class NavigationNode(Node):
         # -----------------------------------------------------------------
         self._publish_msgs(traj_batch)
         self._publish_viz(traj_batch)
+        self._publish_goal_images(sg_pil, goal_pil)  # ← 호출
+
+    # ------------------------------------------------------------------
+    # Publish helpers (추가)
+    # ------------------------------------------------------------------
+    def _publish_goal_images(self, sg_img: PILImage.Image, goal_img: PILImage.Image):
+        """Publish current sub‑goal and final goal images as ROS sensor_msgs/Image."""
+        for img, pub in [(sg_img, self.subgoal_pub), (goal_img, self.goal_pub_img)]:
+            cv_img = cv2.cvtColor(np.array(img.convert("RGB")), cv2.COLOR_RGB2BGR)
+            msg = self.bridge.cv2_to_imgmsg(cv_img, encoding="bgr8")
+            msg.header.stamp = self.get_clock().now().to_msg()
+            pub.publish(msg)
 
     # ------------------------------------------------------------------
     # Publish helpers
@@ -221,6 +245,7 @@ class NavigationNode(Node):
         self.goal_pub.publish(Bool(data=reached))
 
     def _publish_viz(self, traj_batch: np.ndarray):
+        traj_batch *= MAX_V / RATE  # undo normalisation
         frame = np.array(self.context_queue[-1])
         h, w = frame.shape[:2]
         viz = frame.copy()
