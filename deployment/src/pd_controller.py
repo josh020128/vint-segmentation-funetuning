@@ -42,6 +42,7 @@ RATE: int = 9  # control loop Hz
 EPS: float = 1e-8
 WAYPOINT_TIMEOUT: float = 1.0  # seconds – drop stale waypoint
 
+
 # ────────────────────────────────────────────────────────────────────────────────
 class PDControllerNode(Node):
     """ROS 2 node implementing a planar PD controller."""
@@ -57,12 +58,16 @@ class PDControllerNode(Node):
 
         # pubs / subs
         self.vel_pub = self.create_publisher(Twist, VEL_TOPIC, 1)
-        self.create_subscription(Float32MultiArray, WAYPOINT_TOPIC, self._waypoint_cb, 1)
+        self.create_subscription(
+            Float32MultiArray, WAYPOINT_TOPIC, self._waypoint_cb, 1
+        )
         self.create_subscription(Bool, REACHED_GOAL_TOPIC, self._goal_cb, 1)
 
         # timer for control loop
         self.create_timer(1.0 / RATE, self._timer_cb)
-        self.get_logger().info("PD controller node initialised – waiting for waypoints…")
+        self.get_logger().info(
+            "PD controller node initialised – waiting for waypoints…"
+        )
 
     # ─────────────────────── callbacks ────────────────────────
     def _waypoint_cb(self, msg: Float32MultiArray) -> None:
@@ -75,7 +80,10 @@ class PDControllerNode(Node):
 
     # ─────────────────────── helpers ──────────────────────────
     def _waypoint_valid(self) -> bool:
-        return self.waypoint is not None and (time.time() - self._last_wp_time) < WAYPOINT_TIMEOUT
+        return (
+            self.waypoint is not None
+            and (time.time() - self._last_wp_time) < WAYPOINT_TIMEOUT
+        )
 
     @staticmethod
     def _pd_control(wp: np.ndarray) -> Tuple[float, float]:
@@ -121,12 +129,15 @@ class PDControllerNode(Node):
 
         self.vel_pub.publish(vel_msg)
 
+
 # ────────────────────────────────────────────────────────────────────────────────
+
 
 def main(args=None):  # pragma: no cover
     rclpy.init(args=args)
     node = PDControllerNode()
     rclpy.spin(node)
+
 
 if __name__ == "__main__":  # pragma: no cover
     main()

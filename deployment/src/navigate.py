@@ -23,6 +23,9 @@ from utils import msg_to_pil, to_numpy, transform_images, load_model
 from vint_train.training.train_utils import get_action
 from topic_names import IMAGE_TOPIC, WAYPOINT_TOPIC, SAMPLED_ACTIONS_TOPIC
 
+from UniDepth.unidepth.models import UniDepthV2
+from UniDepth.unidepth.utils.camera import Pinhole
+
 # ---------------------------------------------------------------------------
 # CONFIG & CONSTANTS
 # ---------------------------------------------------------------------------
@@ -84,16 +87,29 @@ class NavigationNode(Node):
             prediction_type="epsilon",
         )
 
+        self.bridge = CvBridge()
+        self.context_queue: Deque[np.ndarray] = deque(maxlen=self.context_size + 1)
+        self.last_ctx_time = self.get_clock().now()
+        self.ctx_dt = 0.25
+
+        self.current_waypoint = np.zeros(2)
+        self.obstacle_points = None
+
+        self.top_view_size = (400, 400)
+        self.proximity_threshold = 0.8
+        self.top_view_resolution = self.top_view_size[0] / self.proximity_threshold
+        self.top_view_sampling_step = 5
+        self.safety_margin = 0.17
+        self.DIM = (640, 480)
+
+        self._init_depth_model()
+
         # Topological map ----------------------------------------------------
         self.topomap: List[PILImage] = self._load_topomap(args.dir)
         self.goal_node = (
             (len(self.topomap) - 1) if args.goal_node == -1 else args.goal_node
         )
         self.closest_node = 0
-
-        # State --------------------------------------------------------------
-        self.context_queue: Deque[np.ndarray] = deque(maxlen=self.context_size + 1)
-        self.bridge = CvBridge()
 
         # ROS interfaces -----------------------------------------------------
         self.create_subscription(Image, IMAGE_TOPIC, self._image_cb, 1)
@@ -107,8 +123,6 @@ class NavigationNode(Node):
         self.goal_pub_img = self.create_publisher(Image, "navigation_goal", 1)
         self.create_timer(1.0 / RATE, self._timer_cb)
         self.get_logger().info("Navigation node initialised. Waiting for images…")
-        self.ctx_dt = 0.25
-        self.last_ctx_time = self.get_clock().now()
 
         # ------------------------------------------------------------------
 
@@ -121,6 +135,20 @@ class NavigationNode(Node):
             raise FileNotFoundError(f"Topomap directory {dpath} does not exist")
         img_files = sorted(os.listdir(dpath), key=lambda x: int(os.path.splitext(x)[0]))
         return [PILImage.open(dpath / f) for f in img_files]
+
+    def _init_depth_model(self):
+        self.K = np.load("src/mrvn/mrvn/UniDepth/assets/fisheye/fisheye_intrinsics.npy")
+        self.D = np.load("src/mrvn/mrvn/UniDepth/assets/fisheye/fisheye_distortion.npy")
+        self.map1, self.map2 = cv2.fisheye.initUndistortRectifyMap(
+            self.K, self.D, np.eye(3), self.K, self.DIM, cv2.CV_16SC2
+        )
+        self.intrinsics_torch = torch.from_numpy(self.K).unsqueeze(0).to(self.device)
+        self.camera = Pinhole(K=self.intrinsics_torch)
+        self.depth_model = (
+            UniDepthV2.from_pretrained("lpiccinelli/unidepth-v2-vits14")
+            .to(self.device)
+            .eval()
+        )
 
     # ------------------------------------------------------------------
     # Callbacks
