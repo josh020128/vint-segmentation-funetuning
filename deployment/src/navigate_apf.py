@@ -228,7 +228,7 @@ class NavigationNode(Node):
         self, trajectories: np.ndarray
     ) -> np.ndarray:
         if self.obstacle_points is None or len(self.obstacle_points) == 0:
-            return trajectories
+            return trajectories * (MAX_V / RATE)
 
         updated_trajs = trajectories.copy()
         for i in range(updated_trajs.shape[0]):
@@ -389,8 +389,9 @@ class NavigationNode(Node):
         # chosen waypoint
         # chosen = traj_batch[0][self.args.waypoint]
 
-        if self.model_params.get("normalize", False):
-            chosen *= MAX_V / RATE
+        # if self.model_params.get("normalize", False):
+        #     chosen *= MAX_V / RATE
+
         wp_msg = Float32MultiArray()
         wp_msg.data = [float(chosen[0]), float(chosen[1]), 0.0, 0.0]  # 4‑D compat
         self.waypoint_pub.publish(wp_msg)
@@ -400,7 +401,7 @@ class NavigationNode(Node):
         self.goal_pub.publish(Bool(data=reached))
 
     def _publish_viz(self, traj_batch: np.ndarray):
-        traj_batch *= MAX_V / RATE  # undo normalisation
+        # traj_batch *= MAX_V / RATE  # undo normalisation
         frame = np.array(self.context_queue[-1])
         h, w = frame.shape[:2]
         viz = frame.copy()
