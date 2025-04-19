@@ -90,22 +90,42 @@ class PDControllerNode(Node):
         """Compute (v, w) for 2‑D or 4‑D waypoint."""
         if wp.size == 2:
             dx, dy = wp
+            use_heading = False
         elif wp.size == 4:
             dx, dy, hx, hy = wp
+            use_heading = np.abs(dx) < EPS and np.abs(dy) < EPS
         else:
             raise ValueError("Waypoint must be 2‑D or 4‑D vector")
 
-        # heading‑only case
-        if wp.size == 4 and abs(dx) < EPS and abs(dy) < EPS:
+        # # heading‑only case
+        # if wp.size == 4 and abs(dx) < EPS and abs(dy) < EPS:
+        #     v = 0.0
+        #     w = clip_angle(np.arctan2(hy, hx)) / DT
+        # # rotate in place when dx ≈ 0
+        # elif abs(dx) < EPS:
+        #     v = 0.0
+        #     w = np.sign(dy) * np.pi / (2 * DT)
+        # else:
+        #     v = dx / DT
+        #     w = np.arctan(dy / dx) / DT
+
+        # === 각도 계산 ===
+        if use_heading:
             v = 0.0
-            w = clip_angle(np.arctan2(hy, hx)) / DT
-        # rotate in place when dx ≈ 0
+            desired_yaw = np.arctan2(hy, hx)
         elif abs(dx) < EPS:
             v = 0.0
-            w = np.sign(dy) * np.pi / (2 * DT)
+            desired_yaw = np.sign(dy) * np.pi / 2
         else:
             v = dx / DT
-            w = np.arctan(dy / dx) / DT
+            desired_yaw = np.arctan(dy / dx)
+
+        # === 회전만 수행하는 조건 ===
+        MAX_ROTATION_ONLY_ANGLE = np.deg2rad(30)
+        if abs(desired_yaw) > MAX_ROTATION_ONLY_ANGLE:
+            v = 0.0  # 직진 억제
+
+        w = clip_angle(desired_yaw) / DT
 
         return float(np.clip(v, 0.0, MAX_V)), float(np.clip(w, -MAX_W, MAX_W))
 
