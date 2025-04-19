@@ -165,7 +165,10 @@ class NavigationNode(Node):
         self.context_queue.append(msg_to_pil(msg))
         self.last_ctx_time = now
 
-        frame = cv2.resize(img, self.DIM)
+        cv2_img = self.bridge.imgmsg_to_cv2(msg)
+        pil_img = cv2_to_pil(cv2_img)
+
+        frame = cv2.resize(cv2_img, self.DIM)
         undistorted = cv2.remap(
             frame, self.map1, self.map2, interpolation=cv2.INTER_LINEAR
         )
@@ -425,6 +428,13 @@ class NavigationNode(Node):
         img_msg = self.bridge.cv2_to_imgmsg(viz, encoding="rgb8")
         img_msg.header.stamp = self.get_clock().now().to_msg()
         self.viz_pub.publish(img_msg)
+
+
+def cv2_to_pil(cv2_img: np.ndarray) -> PILImage.Image:
+    rgb_img = cv2.cvtColor(cv2_img, cv2.COLOR_BGR2RGB)
+    pil_img = PILImage.fromarray(rgb_img)
+    pil_img.load()  # 이 줄을 추가해 lazy wrapper 제거
+    return pil_img
 
 
 # ---------------------------------------------------------------------------
