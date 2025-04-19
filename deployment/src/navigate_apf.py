@@ -159,6 +159,7 @@ class NavigationNode(Node):
     # ------------------------------------------------------------------
 
     def _image_cb(self, msg: Image):
+
         now = self.get_clock().now()
         if (now - self.last_ctx_time).nanoseconds < self.ctx_dt * 1e9:
             return  # 아직 0.25 s 안 지났으면 무시
@@ -196,7 +197,12 @@ class NavigationNode(Node):
             & (img_y >= 0)
             & (img_y < self.top_view_size[1])
         )
-        depth_vals, real_x, real_z = Z[valid], X[valid], Z[valid]
+        # depth_vals, real_x, real_z = Z[valid], X[valid], Z[valid]
+        img_x = img_x[valid]
+        img_y = img_y[valid]
+        depth_vals = Z[valid]
+        real_x = X[valid]
+        real_z = Z[valid]
 
         sampled_obstacles = []
         for x in range(0, self.top_view_size[0], self.top_view_sampling_step):
@@ -283,6 +289,9 @@ class NavigationNode(Node):
 
     def _timer_cb(self):
         if len(self.context_queue) <= self.context_size:
+            self.get_logger().info(
+                f"Waiting for context images… {len(self.context_queue)}/{self.context_size}"
+            )
             return
 
         # -----------------------------------------------------------------
