@@ -157,6 +157,8 @@ class NavigationNode(Node):
     def _image_cb(self, msg: Image):
         now = self.get_clock().now()
         if (now - self.last_ctx_time).nanoseconds < self.ctx_dt * 1e9:
+            # print context queue length
+            self.get_logger().info(f"Context queue length: {len(self.context_queue)}")
             return  # 아직 0.25 s 안 지났으면 무시
         self.context_queue.append(msg_to_pil(msg))
         self.last_ctx_time = now
