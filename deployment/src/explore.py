@@ -68,6 +68,8 @@ class ExplorationNode(Node):
 
         self.model, self.model_params = _load_model(args.model, self.device)
         self.context_size: int = self.model_params["context_size"]
+        self.last_ctx_time = self.get_clock().now()
+        self.ctx_dt = 0.25
 
         self.noise_scheduler = DDPMScheduler(
             num_train_timesteps=self.model_params["num_diffusion_iters"],
@@ -95,7 +97,13 @@ class ExplorationNode(Node):
     # ------------------------------------------------------------------
 
     def _image_cb(self, msg: Image):
+        now = self.get_clock().now()
+        if (now - self.last_ctx_time).nanoseconds < self.ctx_dt * 1e9:
+            # print context queue length
+            self.get_logger().info(f"Context queue length: {len(self.context_queue)}")
+            return  # 아직 0.25 s 안 지났으면 무시
         self.context_queue.append(msg_to_pil(msg))
+        self.last_ctx_time = now
 
     def _timer_cb(self):
         if len(self.context_queue) <= self.context_size:
