@@ -137,7 +137,7 @@ class NavigationNode(Node):
         return [PILImage.open(dpath / f) for f in img_files]
 
     def _init_depth_model(self):
-        self.K = np.load("./deployment/src/UniDepth/assets/oakd/fisheye_intrinsics.npy")
+        self.K = np.load("./UniDepth/assets/oakd/intrinsics.npy")
         self.D = np.array(
             [[0.01721098, 0.29320023, 0.01019189, -0.00321903, -0.74943285]]
         )  # shape: (1, 5)

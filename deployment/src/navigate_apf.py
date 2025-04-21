@@ -137,12 +137,8 @@ class NavigationNode(Node):
         return [PILImage.open(dpath / f) for f in img_files]
 
     def _init_depth_model(self):
-        self.K = np.load(
-            "./deployment/src/UniDepth/assets/fisheye/fisheye_intrinsics.npy"
-        )
-        self.D = np.load(
-            "./deployment/src/UniDepth/assets/fisheye/fisheye_distortion.npy"
-        )
+        self.K = np.load("./UniDepth/assets/fisheye/fisheye_intrinsics.npy")
+        self.D = np.load("./UniDepth/assets/fisheye/fisheye_distortion.npy")
         self.map1, self.map2 = cv2.fisheye.initUndistortRectifyMap(
             self.K, self.D, np.eye(3), self.K, self.DIM, cv2.CV_16SC2
         )
