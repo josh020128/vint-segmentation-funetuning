@@ -100,7 +100,7 @@ class NavigationNode(Node):
         self.top_view_resolution = self.top_view_size[0] / self.proximity_threshold
         self.top_view_sampling_step = 5
         self.safety_margin = 0.17
-        self.DIM = (640, 360)
+        self.DIM = (640, 480)  # (640, 360)
 
         self._init_depth_model()
 
@@ -112,9 +112,7 @@ class NavigationNode(Node):
         self.closest_node = 0
 
         # ROS interfaces -----------------------------------------------------
-        self.create_subscription(
-            Image, "/oakd/rgb/preview/image_raw", self._image_cb, 1
-        )
+        self.create_subscription(Image, "/camera/image_color", self._image_cb, 1)
         self.waypoint_pub = self.create_publisher(Float32MultiArray, WAYPOINT_TOPIC, 1)
         self.sampled_actions_pub = self.create_publisher(
             Float32MultiArray, SAMPLED_ACTIONS_TOPIC, 1
@@ -139,14 +137,14 @@ class NavigationNode(Node):
         return [PILImage.open(dpath / f) for f in img_files]
 
     def _init_depth_model(self):
-        self.K = np.load("./deployment/src/UniDepth/assets/oakd/intrinsics.npy")
-        self.D = np.array(
-            [[-0.04774601, 0.036111, -0.00458044, -0.00408317, -0.04546457]]
-        )  # shape: (1, 5)
+        self.K = np.load("./deployment/src/UniDepth/assets/robomaster/intrinsics.npy")
+        # self.D = np.array(
+        #     [[-0.04774601, 0.036111, -0.00458044, -0.00408317, -0.04546457]]
+        # )  # shape: (1, 5)
 
-        self.map1, self.map2 = cv2.initUndistortRectifyMap(
-            self.K, self.D, None, self.K, self.DIM, cv2.CV_16SC2
-        )
+        # self.map1, self.map2 = cv2.initUndistortRectifyMap(
+        #     self.K, self.D, None, self.K, self.DIM, cv2.CV_16SC2
+        # )
 
         self.intrinsics_torch = (
             torch.from_numpy(self.K).unsqueeze(0).float().to(self.device)
@@ -172,13 +170,13 @@ class NavigationNode(Node):
         self.last_ctx_time = now
 
         cv2_img = self.bridge.imgmsg_to_cv2(msg)
-        pil_img = cv2_to_pil(cv2_img)
+        # pil_img = cv2_to_pil(cv2_img)
 
-        frame = cv2.resize(cv2_img, self.DIM)
-        undistorted = cv2.remap(
-            frame, self.map1, self.map2, interpolation=cv2.INTER_LINEAR
-        )
-        rgb = cv2.cvtColor(undistorted, cv2.COLOR_BGR2RGB)
+        frame = cv2_img.copy()  # cv2.resize(cv2_img, self.DIM)
+        # undistorted = cv2.remap(
+        #     frame, self.map1, self.map2, interpolation=cv2.INTER_LINEAR
+        # )
+        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         rgb_torch = (
             torch.from_numpy(rgb).permute(2, 0, 1).unsqueeze(0).float().to(self.device)
         )
