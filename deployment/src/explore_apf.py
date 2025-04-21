@@ -282,8 +282,8 @@ class ExplorationNode(Node):
         self.sampled_actions_pub.publish(sampled_actions_msg)
 
         chosen = traj_batch[0][self.args.waypoint]
-        if self.model_params.get("normalize", False):
-            chosen *= MAX_V / RATE
+        # if self.model_params.get("normalize", False):
+        #     chosen *= MAX_V / RATE
         waypoint_msg = Float32MultiArray()
         waypoint_msg.data = [float(chosen[0]), float(chosen[1])]
         self.waypoint_pub.publish(waypoint_msg)
