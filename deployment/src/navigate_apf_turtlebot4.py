@@ -177,9 +177,9 @@ class NavigationNode(Node):
         with torch.no_grad():
             outputs = self.depth_model.infer(rgb_tensor, self.camera)
             points = outputs["points"].squeeze().cpu().numpy()
-            depth = outputs["depth"].squeeze().cpu().numpy()
+            # depth = outputs["depth"].squeeze().cpu().numpy()
 
-            print(f"min depth: {np.min(depth)}, max depth: {np.max(depth)}")
+            # print(f"min depth: {np.min(depth)}, max depth: {np.max(depth)}")
 
         X, Y, Z = points[0].flatten(), points[1].flatten(), points[2].flatten()
         mask = (Z > 0) & (Z <= self.proximity_threshold) & (Y >= -0.05)
@@ -261,7 +261,7 @@ class NavigationNode(Node):
             )
             updated_trajs[i] = (rotation_matrix @ updated_trajs[i].T).T
 
-        return updated_trajs
+        return updated_trajs * (MAX_V / RATE)
 
     def _angle_between(self, v1: np.ndarray, v2: np.ndarray) -> float:
         n1, n2 = np.linalg.norm(v1), np.linalg.norm(v2)

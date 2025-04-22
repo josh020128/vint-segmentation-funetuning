@@ -142,8 +142,8 @@ class NavigationNode(Node):
         self.map1, self.map2 = cv2.fisheye.initUndistortRectifyMap(
             self.K, self.D, np.eye(3), self.K, self.DIM, cv2.CV_16SC2
         )
-        self.intrinsics_torch = torch.from_numpy(self.K).unsqueeze(0).to(self.device)
-        self.camera = Pinhole(K=self.intrinsics_torch)
+        # self.intrinsics_torch = torch.from_numpy(self.K).unsqueeze(0).to(self.device)
+        # self.camera = Pinhole(K=self.intrinsics_torch)
         self.depth_model = (
             UniDepthV2.from_pretrained("lpiccinelli/unidepth-v2-vits14")
             .to(self.device)
@@ -173,6 +173,9 @@ class NavigationNode(Node):
         rgb_torch = (
             torch.from_numpy(rgb).permute(2, 0, 1).unsqueeze(0).float().to(self.device)
         )
+
+        self.intrinsics_torch = torch.from_numpy(self.K).unsqueeze(0).to(self.device)
+        self.camera = Pinhole(K=self.intrinsics_torch)
 
         with torch.no_grad():
             outputs = self.depth_model.infer(rgb_torch, self.camera)
@@ -258,7 +261,7 @@ class NavigationNode(Node):
             )
             updated_trajs[i] = (rotation_matrix @ updated_trajs[i].T).T
 
-        return updated_trajs
+        return updated_trajs * (MAX_V / RATE)
 
     def _angle_between(self, v1: np.ndarray, v2: np.ndarray) -> float:
         n1, n2 = np.linalg.norm(v1), np.linalg.norm(v2)

@@ -21,6 +21,9 @@ from utils import msg_to_pil, to_numpy, transform_images, load_model
 from vint_train.training.train_utils import get_action
 from topic_names import IMAGE_TOPIC, WAYPOINT_TOPIC, SAMPLED_ACTIONS_TOPIC
 
+from UniDepth.unidepth.utils.camera import Pinhole
+from UniDepth.unidepth.models import UniDepthV2
+
 # ------------------------------- CONSTANTS ----------------------------------
 THIS_DIR = Path(__file__).resolve().parent
 ROBOT_CONFIG_PATH = THIS_DIR / "../config/robot.yaml"
@@ -108,11 +111,9 @@ class ExplorationNode(Node):
         self.map1, self.map2 = cv2.fisheye.initUndistortRectifyMap(
             self.K, self.D, np.eye(3), self.K, self.DIM, cv2.CV_16SC2
         )
-        from UniDepth.unidepth.utils.camera import Pinhole
-        from UniDepth.unidepth.models import UniDepthV2
 
-        self.intrinsics_torch = torch.from_numpy(self.K).unsqueeze(0).to(self.device)
-        self.camera = Pinhole(K=self.intrinsics_torch)
+        # self.intrinsics_torch = torch.from_numpy(self.K).unsqueeze(0).to(self.device)
+        # self.camera = Pinhole(K=self.intrinsics_torch)
         self.depth_model = (
             UniDepthV2.from_pretrained("lpiccinelli/unidepth-v2-vits14")
             .to(self.device)
@@ -142,6 +143,9 @@ class ExplorationNode(Node):
         rgb_torch = (
             torch.from_numpy(rgb).permute(2, 0, 1).unsqueeze(0).float().to(self.device)
         )
+
+        self.intrinsics_torch = torch.from_numpy(self.K).unsqueeze(0).to(self.device)
+        self.camera = Pinhole(K=self.intrinsics_torch)
 
         with torch.no_grad():
             outputs = self.depth_model.infer(rgb_torch, self.camera)

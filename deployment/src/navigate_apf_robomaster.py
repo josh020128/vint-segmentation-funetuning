@@ -146,11 +146,11 @@ class NavigationNode(Node):
         #     self.K, self.D, None, self.K, self.DIM, cv2.CV_16SC2
         # )
 
-        self.intrinsics_torch = (
-            torch.from_numpy(self.K).unsqueeze(0).float().to(self.device)
-        )
+        # self.intrinsics_torch = (
+        #     torch.from_numpy(self.K).unsqueeze(0).float().to(self.device)
+        # )
+        # self.camera = Pinhole(K=self.intrinsics_torch)
 
-        self.camera = Pinhole(K=self.intrinsics_torch)
         self.depth_model = (
             UniDepthV2.from_pretrained("lpiccinelli/unidepth-v2-vits14")
             .to(self.device)
@@ -177,12 +177,15 @@ class NavigationNode(Node):
         #     frame, self.map1, self.map2, interpolation=cv2.INTER_LINEAR
         # )
         rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        rgb_torch = (
+        rgb_tensor = (
             torch.from_numpy(rgb).permute(2, 0, 1).unsqueeze(0).float().to(self.device)
         )
 
+        intrinsics_tensor = torch.from_numpy(self.K).unsqueeze(0).to(self.device)
+        self.camera = Pinhole(K=intrinsics_tensor)
+
         with torch.no_grad():
-            outputs = self.depth_model.infer(rgb_torch, self.camera)
+            outputs = self.depth_model.infer(rgb_tensor, self.camera)
             points = outputs["points"].squeeze().cpu().numpy()
 
         X, Y, Z = points[0].flatten(), points[1].flatten(), points[2].flatten()
