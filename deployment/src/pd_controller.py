@@ -47,8 +47,9 @@ WAYPOINT_TIMEOUT: float = 1.0  # seconds – drop stale waypoint
 class PDControllerNode(Node):
     """ROS 2 node implementing a planar PD controller."""
 
-    def __init__(self) -> None:
+    def __init__(self, controller_type: str) -> None:
         super().__init__("pd_controller")
+        self.controller_type = controller_type
 
         # internal state
         self.waypoint: Optional[np.ndarray] = None
@@ -85,8 +86,7 @@ class PDControllerNode(Node):
             and (time.time() - self._last_wp_time) < WAYPOINT_TIMEOUT
         )
 
-    @staticmethod
-    def _pd_control(wp: np.ndarray) -> Tuple[float, float]:
+    def _pd_control(self, wp: np.ndarray) -> Tuple[float, float]:
         """Compute (v, w) for 2‑D or 4‑D waypoint."""
         if wp.size == 2:
             dx, dy = wp
@@ -121,9 +121,10 @@ class PDControllerNode(Node):
             desired_yaw = np.arctan(dy / dx)
 
         # === 회전만 수행하는 조건 ===
-        MAX_ROTATION_ONLY_ANGLE = np.deg2rad(30)
-        if abs(desired_yaw) > MAX_ROTATION_ONLY_ANGLE:
-            v = 0.0  # 직진 억제
+        if self.controller_type != "nomad":
+            MAX_ROTATION_ONLY_ANGLE = np.deg2rad(30)
+            if abs(desired_yaw) > MAX_ROTATION_ONLY_ANGLE:
+                v = 0.0  # 직진 억제
 
         w = clip_angle(desired_yaw) / DT
 
@@ -155,7 +156,17 @@ class PDControllerNode(Node):
 
 def main(args=None):  # pragma: no cover
     rclpy.init(args=args)
-    node = PDControllerNode()
+
+    # 명령줄 인자 파싱 추가
+    import argparse
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--control", type=str, default="nomad", help="control type (nomad, apf)"
+    )
+    args, unknown = parser.parse_known_args()
+
+    node = PDControllerNode(controller_type=args.control)
     rclpy.spin(node)
 
 
