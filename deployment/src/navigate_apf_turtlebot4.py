@@ -23,8 +23,8 @@ from utils import msg_to_pil, to_numpy, transform_images, load_model
 from vint_train.training.train_utils import get_action
 from topic_names import IMAGE_TOPIC, WAYPOINT_TOPIC, SAMPLED_ACTIONS_TOPIC
 
-from UniDepth.unidepth.models import UniDepthV2
-from UniDepth.unidepth.utils.camera import Pinhole
+from unidepth.models import UniDepthV2
+from unidepth.utils.camera import Pinhole
 
 # ---------------------------------------------------------------------------
 # CONFIG & CONSTANTS
@@ -95,12 +95,11 @@ class NavigationNode(Node):
         self.current_waypoint = np.zeros(2)
         self.obstacle_points = None
 
-        self.top_view_size = (400, 400)
+        self.top_view_size = (320, 320)
         self.proximity_threshold = 0.8
         self.top_view_resolution = self.top_view_size[0] / self.proximity_threshold
         self.top_view_sampling_step = 5
         self.safety_margin = 0.17
-        self.DIM = (320, 200)
 
         self._init_depth_model()
 
@@ -112,7 +111,9 @@ class NavigationNode(Node):
         self.closest_node = 0
 
         # ROS interfaces -----------------------------------------------------
-        self.create_subscription(Image, IMAGE_TOPIC, self._image_cb, 1)
+        self.create_subscription(
+            Image, "/robot2/oakd/rgb/preview/image_raw", self._image_cb, 1
+        )
         self.waypoint_pub = self.create_publisher(Float32MultiArray, WAYPOINT_TOPIC, 1)
         self.sampled_actions_pub = self.create_publisher(
             Float32MultiArray, SAMPLED_ACTIONS_TOPIC, 1
@@ -137,20 +138,14 @@ class NavigationNode(Node):
         return [PILImage.open(dpath / f) for f in img_files]
 
     def _init_depth_model(self):
-        self.K = np.load("./UniDepth/assets/oakd/intrinsics.npy")
-        self.D = np.array(
-            [[0.01721098, 0.29320023, 0.01019189, -0.00321903, -0.74943285]]
-        )  # shape: (1, 5)
+        self.K = np.load("./deployment/src/UniDepth/assets/turtlebot4/intrinsics.npy")
+        # self.K = self.K.astype(np.float32)
+        # self.K = np.array(self.K, dtype=np.float32)
 
-        self.map1, self.map2 = cv2.initUndistortRectifyMap(
-            self.K, self.D, None, self.K, self.DIM, cv2.CV_16SC2
-        )
+        # print(f"self.K: {self.K}")
 
-        self.intrinsics_torch = (
-            torch.from_numpy(self.K).unsqueeze(0).float().to(self.device)
-        )
-
-        self.camera = Pinhole(K=self.intrinsics_torch)
+        # self.intrinsics_torch = torch.from_numpy(self.K).unsqueeze(0).to(self.device)
+        # self.camera = Pinhole(K=self.intrinsics_torch)
         self.depth_model = (
             UniDepthV2.from_pretrained("lpiccinelli/unidepth-v2-vits14")
             .to(self.device)
@@ -163,27 +158,30 @@ class NavigationNode(Node):
 
     def _image_cb(self, msg: Image):
 
-        now = self.get_clock().now()
-        if (now - self.last_ctx_time).nanoseconds < self.ctx_dt * 1e9:
-            return  # 아직 0.25 s 안 지났으면 무시
-        self.context_queue.append(msg_to_pil(msg))
-        self.last_ctx_time = now
+        # now = self.get_clock().now()
+        # if (now - self.last_ctx_time).nanoseconds < self.ctx_dt * 1e9:
+        #     return  # 아직 0.25 s 안 지났으면 무시
+        # self.context_queue.append(msg_to_pil(msg))
+        # self.last_ctx_time = now
 
-        cv2_img = self.bridge.imgmsg_to_cv2(msg)
-        pil_img = cv2_to_pil(cv2_img)
+        frame = self.bridge.imgmsg_to_cv2(msg, desired_encoding="bgr8")
+        # pil_img = cv2_to_pil(cv2_img)
 
-        frame = cv2.resize(cv2_img, self.DIM)
-        undistorted = cv2.remap(
-            frame, self.map1, self.map2, interpolation=cv2.INTER_LINEAR
-        )
-        rgb = cv2.cvtColor(undistorted, cv2.COLOR_BGR2RGB)
-        rgb_torch = (
+        # frame = cv2_img.copy()
+        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        rgb_tensor = (
             torch.from_numpy(rgb).permute(2, 0, 1).unsqueeze(0).float().to(self.device)
         )
 
+        intrinsics_tensor = torch.from_numpy(self.K).unsqueeze(0).to(self.device)
+        self.camera = Pinhole(K=intrinsics_tensor)
+
         with torch.no_grad():
-            outputs = self.depth_model.infer(rgb_torch, self.camera)
+            outputs = self.depth_model.infer(rgb_tensor, self.camera)
             points = outputs["points"].squeeze().cpu().numpy()
+            depth = outputs["depth"].squeeze().cpu().numpy()
+
+            print(f"min depth: {np.min(depth)}, max depth: {np.max(depth)}")
 
         X, Y, Z = points[0].flatten(), points[1].flatten(), points[2].flatten()
         mask = (Z > 0) & (Z <= self.proximity_threshold) & (Y >= -0.05)
