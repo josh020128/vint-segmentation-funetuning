@@ -158,16 +158,14 @@ class NavigationNode(Node):
 
     def _image_cb(self, msg: Image):
 
-        # now = self.get_clock().now()
-        # if (now - self.last_ctx_time).nanoseconds < self.ctx_dt * 1e9:
-        #     return  # 아직 0.25 s 안 지났으면 무시
-        # self.context_queue.append(msg_to_pil(msg))
-        # self.last_ctx_time = now
+        now = self.get_clock().now()
+        if (now - self.last_ctx_time).nanoseconds < self.ctx_dt * 1e9:
+            return  # 아직 0.25 s 안 지났으면 무시
+        self.context_queue.append(msg_to_pil(msg))
+        self.last_ctx_time = now
 
         frame = self.bridge.imgmsg_to_cv2(msg, desired_encoding="bgr8")
-        # pil_img = cv2_to_pil(cv2_img)
 
-        # frame = cv2_img.copy()
         rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         rgb_tensor = (
             torch.from_numpy(rgb).permute(2, 0, 1).unsqueeze(0).float().to(self.device)
