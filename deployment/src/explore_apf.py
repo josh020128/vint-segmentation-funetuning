@@ -36,7 +36,7 @@ MAX_W = ROBOT_CONF["max_w"]
 RATE = ROBOT_CONF["frame_rate"]  # Hz
 
 # Visualisation tuning -------------------------------------------------------
-PIXELS_PER_M = 3.0  # ↓ smaller → shorter drawn trajectories
+PIXELS_PER_M = 60.0  # ↓ smaller → shorter drawn trajectories
 ORIGIN_Y_RATIO = 0.95  # 1.0 = very bottom, 0.0 = very top
 # ----------------------------------------------------------------------------
 
@@ -149,7 +149,7 @@ class ExplorationNode(Node):
         # self.intrinsics_torch = torch.from_numpy(self.K).unsqueeze(0).to(self.device)
         # self.camera = Pinhole(K=self.intrinsics_torch)
         self.depth_model = (
-            UniDepthV2.from_pretrained("lpiccinelli/unidepth-v2-vits14")
+            UniDepthV2.from_pretrained("lpiccinelli/unidepth-v2-vitb14")
             .to(self.device)
             .eval()
         )
@@ -316,11 +316,18 @@ class ExplorationNode(Node):
 
         # 2. Publish Float32MultiArray msgs ----------------------------------
         traj_batch = to_numpy(get_action(naction))
+
+        # Add a flag to track if APF was applied
+        is_apf_applied = (
+            self.obstacle_points is not None and len(self.obstacle_points) > 0
+        )
+
+        # Apply APF if needed
         traj_batch = self.apply_repulsive_forces_to_trajectories(traj_batch)
         self._publish_action_msgs(traj_batch)
 
         # 3. Publish visualisation image ------------------------------------
-        self._publish_viz_image(traj_batch)
+        self._publish_viz_image(traj_batch, is_apf_applied)
 
     # ------------------------------------------------------------------
     # Helpers
@@ -336,7 +343,7 @@ class ExplorationNode(Node):
         waypoint_msg.data = [float(chosen[0]), float(chosen[1])]
         self.waypoint_pub.publish(waypoint_msg)
 
-    def _publish_viz_image(self, traj_batch: np.ndarray):
+    def _publish_viz_image(self, traj_batch: np.ndarray, is_apf_applied: bool = False):
         frame = np.array(self.context_queue[-1])  # latest RGB frame
         img_h, img_w = frame.shape[:2]
         viz = frame.copy()
@@ -356,7 +363,16 @@ class ExplorationNode(Node):
                 pts.append((px, py))
 
             if len(pts) >= 2:
-                color = (0, 255, 0) if i == 0 else (255, 200, 0)
+                # Change colors when APF is applied
+                if is_apf_applied:
+                    color = (
+                        (0, 0, 255) if i == 0 else (180, 0, 255)
+                    )  # Blue for main, purple for others
+                else:
+                    color = (
+                        (0, 255, 0) if i == 0 else (255, 200, 0)
+                    )  # Original green and yellow
+
                 cv2.polylines(viz, [np.array(pts, dtype=np.int32)], False, color, 1)
 
         img_msg = self.bridge.cv2_to_imgmsg(viz, encoding="rgb8")
