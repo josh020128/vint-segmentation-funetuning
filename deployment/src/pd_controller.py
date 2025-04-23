@@ -7,6 +7,7 @@ Behaviour
 * Computes linear/angular velocity commands with a simple PD‑style heuristic.
 * Publishes geometry_msgs/Twist on the velocity topic defined in robot.yaml.
 * Continuously measures and reports distance traveled.
+* Also checks total elapsed time and triggers goal reached when time exceeds 1 minute.
 
 Run after installing your Python package (or directly with `ros2 run` / `python`).
 """
@@ -43,6 +44,7 @@ RATE: int = 9  # control loop Hz
 EPS: float = 1e-8
 WAYPOINT_TIMEOUT: float = 1.0  # seconds – drop stale waypoint
 DISTANCE_REPORT_INTERVAL: float = 0.1  # 이동 거리 보고 간격(초)
+MAX_TIME: float = 300.0  # 최대 실행 시간 (1분)
 
 
 # ────────────────────────────────────────────────────────────────────────────────
@@ -64,6 +66,10 @@ class PDControllerNode(Node):
         self.last_velocity_time: float = time.time()
         self.last_report_time: float = time.time()
         self.current_velocity: float = 0.0
+
+        # 총 시간 측정을 위한 변수 추가
+        self.start_time: float = time.time()
+        self.total_time: float = 0.0
 
         # pubs / subs
         self.vel_pub = self.create_publisher(Twist, VEL_TOPIC, 1)
@@ -88,6 +94,7 @@ class PDControllerNode(Node):
         self.reached_goal = msg.data
         if self.reached_goal:
             self.get_logger().info(f"최종 이동 거리: {self.total_distance:.3f} 미터")
+            self.get_logger().info(f"총 소요 시간: {self.total_time:.3f} 초")
 
     # ─────────────────────── helpers ──────────────────────────
     def _waypoint_valid(self) -> bool:
@@ -137,7 +144,7 @@ class PDControllerNode(Node):
         if velocity > 0.0:  # 양수 속도일 때만 거리 계산
             distance = velocity * dt
             self.total_distance += distance
-            if self.total_distance > 5.0:
+            if self.total_distance > 100.0:
                 self._goal_cb(Bool(data=True))  # 5m 이동 시 목표 도달로 간주
 
         self.last_velocity_time = current_time
@@ -150,6 +157,16 @@ class PDControllerNode(Node):
     # ─────────────────────── timer ────────────────────────────
     def _timer_cb(self) -> None:
         vel_msg = Twist()
+
+        # 총 시간 업데이트
+        current_time = time.time()
+        self.total_time = current_time - self.start_time
+
+        # 1분 경과 시 목표 도달로 처리
+        print("현재 이동 시간:", self.total_time)
+        if self.total_time > MAX_TIME:
+            self.get_logger().info(f"최대 시간({MAX_TIME}초) 초과 - 목표 도달 처리")
+            self._goal_cb(Bool(data=True))
 
         if self.reached_goal:
             self.vel_pub.publish(vel_msg)  # publish zero velocity to halt
