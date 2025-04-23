@@ -41,7 +41,7 @@ MAX_W = ROBOT_CONF["max_w"]
 RATE = ROBOT_CONF["frame_rate"]  # Hz
 
 # Visualisation -------------------------------------------------------------
-PIXELS_PER_M = 40.0  # px for 1 m (feel free to tune)
+PIXELS_PER_M = 40.0  # px for 1 m (feel free to tune)
 ORIGIN_Y_RATIO = 0.95  # where to anchor trajectories vertically
 
 # ---------------------------------------------------------------------------
@@ -76,16 +76,18 @@ class NavigationNode(Node):
         self.get_logger().info(f"Using device: {self.device}")
 
         self.model, self.model_params = _load_model(args.model, self.device)
-        if self.model_params["model_type"] != "nomad":
-            raise NotImplementedError("Only model_type 'nomad' supported in ROS 2 port")
+        self.get_logger().info(f"Using model type: {self.model_params['model_type']}")
 
         self.context_size: int = self.model_params["context_size"]
-        self.noise_scheduler = DDPMScheduler(
-            num_train_timesteps=self.model_params["num_diffusion_iters"],
-            beta_schedule="squaredcos_cap_v2",
-            clip_sample=True,
-            prediction_type="epsilon",
-        )
+
+        # NOMAD 모델인 경우에만 noise_scheduler 초기화
+        if self.model_params["model_type"] == "nomad":
+            self.noise_scheduler = DDPMScheduler(
+                num_train_timesteps=self.model_params["num_diffusion_iters"],
+                beta_schedule="squaredcos_cap_v2",
+                clip_sample=True,
+                prediction_type="epsilon",
+            )
 
         self.bridge = CvBridge()
         self.context_queue: Deque[np.ndarray] = deque(maxlen=self.context_size + 1)
@@ -107,8 +109,6 @@ class NavigationNode(Node):
         elif args.robot == "turtlebot4":
             self.safety_margin = 0.17
 
-        # self.safety_margin = 0.17
-
         # 로봇 타입에 따른 이미지 크기 설정
         if args.robot == "locobot":
             self.DIM = (320, 240)
@@ -126,13 +126,13 @@ class NavigationNode(Node):
         )
         self.closest_node = 0
 
-        # ROS interfaces -----------------------------------------------------
+        # ROS interfaces -----------------------------------------------------
         if args.robot == "locobot":
-            image_topic = "/camera/image"  # 상수에서 가져옴
+            image_topic = "/camera/image"
         elif args.robot == "robomaster":
             image_topic = "/camera/image_color"
         elif args.robot == "turtlebot4":
-            image_topic = "/robot2/oakd/rgb/preview/image_raw"  # 적절한 토픽으로 변경
+            image_topic = "/robot2/oakd/rgb/preview/image_raw"
         else:
             raise ValueError(f"Unknown robot type: {args.robot}")
 
@@ -147,8 +147,6 @@ class NavigationNode(Node):
         self.goal_pub_img = self.create_publisher(Image, "navigation_goal", 1)
         self.create_timer(1.0 / RATE, self._timer_cb)
         self.get_logger().info("Navigation node initialised. Waiting for images…")
-
-        # ------------------------------------------------------------------
 
     # Helper: topomap
     # ------------------------------------------------------------------
@@ -174,8 +172,6 @@ class NavigationNode(Node):
         else:
             raise ValueError(f"Unsupported robot type: {self.args.robot}")
 
-        # self.intrinsics_torch = torch.from_numpy(self.K).unsqueeze(0).to(self.device)
-        # self.camera = Pinhole(K=self.intrinsics_torch)
         self.depth_model = (
             UniDepthV2.from_pretrained("lpiccinelli/unidepth-v2-vits14")
             .to(self.device)
@@ -207,7 +203,6 @@ class NavigationNode(Node):
         elif self.args.robot == "turtlebot4":
             frame = cv2_img.copy()
             rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            # pass
 
         rgb_torch = (
             torch.from_numpy(rgb).permute(2, 0, 1).unsqueeze(0).float().to(self.device)
@@ -224,6 +219,7 @@ class NavigationNode(Node):
         mask = (Z > 0) & (Z <= self.proximity_threshold) & (Y >= -0.05)
         self._update_top_view_and_obstacles(X[mask], Y[mask], Z[mask])
 
+    # APF 관련 메서드들은 그대로 유지
     def _update_top_view_and_obstacles(self, X, Y, Z_0):
         Z = np.maximum(Z_0 - self.safety_margin, 1e-3)
         img_x = np.int32(self.top_view_size[0] // 2 + X * self.top_view_resolution)
@@ -235,7 +231,6 @@ class NavigationNode(Node):
             & (img_y >= 0)
             & (img_y < self.top_view_size[1])
         )
-        # depth_vals, real_x, real_z = Z[valid], X[valid], Z[valid]
         img_x = img_x[valid]
         img_y = img_y[valid]
         depth_vals = Z[valid]
@@ -314,9 +309,7 @@ class NavigationNode(Node):
         if self.obstacle_points is None or len(self.obstacle_points) == 0:
             return default_idx
 
-        prev_wp = (
-            self.current_waypoint
-        )  # if hasattr(self, "current_waypoint") else np.zeros(2)
+        prev_wp = self.current_waypoint
 
         if np.linalg.norm(prev_wp) < 1e-3:
             return default_idx
@@ -332,6 +325,18 @@ class NavigationNode(Node):
             )
             return
 
+        # 모델 타입에 따라 다른 처리
+        if self.model_params["model_type"] == "nomad":
+            self._timer_cb_nomad()
+        else:
+            self._timer_cb_other()
+
+        # 목표 도달 시 로그 출력
+        if self.closest_node == self.goal_node:
+            self.get_logger().info("Reached goal! Stopping...")
+
+    def _timer_cb_nomad(self):
+        """NOMAD 모델을 위한 타이머 콜백 처리 (APF 포함)"""
         # -----------------------------------------------------------------
         # 1. Compute closest node via distance prediction
         # -----------------------------------------------------------------
@@ -373,9 +378,9 @@ class NavigationNode(Node):
             len(goal_tensor) - 1,
         )
         obs_cond = obsgoal_cond[sg_idx].unsqueeze(0)
-        sg_global_idx = start + sg_idx  # ← 새로 추가
-        sg_pil = self.topomap[sg_global_idx]  # ← 새로 추가
-        goal_pil = self.topomap[self.goal_node]  # ← 새로 추가
+        sg_global_idx = start + sg_idx
+        sg_pil = self.topomap[sg_global_idx]
+        goal_pil = self.topomap[self.goal_node]
 
         # -----------------------------------------------------------------
         # 2. Sample trajectories towards sub‑goal (diffusion)
@@ -413,15 +418,93 @@ class NavigationNode(Node):
         self.current_waypoint = chosen_waypoint
 
         # -----------------------------------------------------------------
-        # 3. Publish ROS messages
+        # 3. Publish ROS messages
         # -----------------------------------------------------------------
         self._publish_msgs(traj_batch, chosen_waypoint)
         self._publish_viz(traj_batch, is_apf_applied)
-        self._publish_goal_images(sg_pil, goal_pil)  # ← 호출
+        self._publish_goal_images(sg_pil, goal_pil)
 
-    # ------------------------------------------------------------------
-    # Publish helpers (추가)
-    # ------------------------------------------------------------------
+    def _timer_cb_other(self):
+        """nomad 외의 모델을 위한 타이머 콜백 처리"""
+        start = max(self.closest_node - self.args.radius, 0)
+        end = min(self.closest_node + self.args.radius + 1, self.goal_node)
+
+        # 배치 준비
+        batch_obs_imgs = []
+        batch_goal_data = []
+
+        for i, sg_img in enumerate(self.topomap[start : end + 1]):
+            transf_obs_img = transform_images(
+                list(self.context_queue), self.model_params["image_size"]
+            )
+            goal_data = transform_images(sg_img, self.model_params["image_size"])
+            batch_obs_imgs.append(transf_obs_img)
+            batch_goal_data.append(goal_data)
+
+        # 모델 추론
+        batch_obs_imgs = torch.cat(batch_obs_imgs, dim=0).to(self.device)
+        batch_goal_data = torch.cat(batch_goal_data, dim=0).to(self.device)
+
+        with torch.no_grad():
+            distances, waypoints = self.model(batch_obs_imgs, batch_goal_data)
+            distances_np = to_numpy(distances)
+            waypoints_np = to_numpy(waypoints)
+
+        # 가장 가까운 노드 찾기
+        min_dist_idx = np.argmin(distances_np)
+
+        # 서브골과 경로점 선택
+        chosen_waypoint = np.zeros(4)  # 4차원 벡터
+        selected_waypoints = None
+
+        if distances_np[min_dist_idx] > self.args.close_threshold:
+            chosen_waypoint[:2] = waypoints_np[min_dist_idx][self.args.waypoint][:2]
+            selected_waypoints = waypoints_np[min_dist_idx]
+            self.closest_node = start + min_dist_idx
+        else:
+            next_idx = min(min_dist_idx + 1, len(waypoints_np) - 1)
+            chosen_waypoint[:2] = waypoints_np[next_idx][self.args.waypoint][:2]
+            selected_waypoints = waypoints_np[next_idx]
+            self.closest_node = min(start + min_dist_idx + 1, self.goal_node)
+
+        # 정규화 적용
+        if self.model_params.get("normalize", False):
+            chosen_waypoint[:2] *= MAX_V / RATE
+
+        # waypoint 메시지 발행
+        waypoint_msg = Float32MultiArray()
+        waypoint_msg.data = chosen_waypoint.tolist()
+        self.waypoint_pub.publish(waypoint_msg)
+
+        # 목표 도달 상태 발행
+        reached_goal = bool(self.closest_node == self.goal_node)
+        self.goal_pub.publish(Bool(data=reached_goal))
+
+        # 시각화를 위한 추가 코드
+        sg_global_idx = min(
+            start
+            + min_dist_idx
+            + int(distances_np[min_dist_idx] <= self.args.close_threshold),
+            self.goal_node,
+        )
+        sg_pil = self.topomap[sg_global_idx]
+        goal_pil = self.topomap[self.goal_node]
+
+        # 시각화를 위한 궤적 생성
+        if selected_waypoints is not None:
+            traj_vis = np.zeros((1, len(selected_waypoints), 2))
+            for i in range(len(selected_waypoints)):
+                traj_vis[0, i] = selected_waypoints[i][:2]
+
+            if self.model_params.get("normalize", False):
+                traj_vis *= MAX_V / RATE
+
+            self._publish_viz(traj_vis, False)  # APF는 non-nomad 모델에서 사용하지 않음
+
+        # 목표 이미지 발행
+        self._publish_goal_images(sg_pil, goal_pil)
+
+    # Publish helpers
     def _publish_goal_images(self, sg_img: PILImage.Image, goal_img: PILImage.Image):
         """Publish current sub‑goal and final goal images as ROS sensor_msgs/Image."""
         for img, pub in [(sg_img, self.subgoal_pub), (goal_img, self.goal_pub_img)]:
@@ -430,10 +513,6 @@ class NavigationNode(Node):
             msg.header.stamp = self.get_clock().now().to_msg()
             pub.publish(msg)
 
-    # ------------------------------------------------------------------
-    # Publish helpers
-    # ------------------------------------------------------------------
-
     def _publish_msgs(self, traj_batch: np.ndarray, chosen: np.ndarray):
         # sampled actions
         actions_msg = Float32MultiArray()
@@ -441,13 +520,8 @@ class NavigationNode(Node):
         self.sampled_actions_pub.publish(actions_msg)
 
         # chosen waypoint
-        # chosen = traj_batch[0][self.args.waypoint]
-
-        # if self.model_params.get("normalize", False):
-        #     chosen *= MAX_V / RATE
-
         wp_msg = Float32MultiArray()
-        wp_msg.data = [float(chosen[0]), float(chosen[1]), 0.0, 0.0]  # 4‑D compat
+        wp_msg.data = [float(chosen[0]), float(chosen[1]), 0.0, 0.0]
         self.waypoint_pub.publish(wp_msg)
 
         # goal status
@@ -466,43 +540,31 @@ class NavigationNode(Node):
             pts = []
             acc_x = acc_y = 0.0
             for dx, dy in traj:
+                if np.isnan(dx) or np.isnan(dy):
+                    continue
                 acc_x += dx
                 acc_y += dy
                 px = int(cx - dy * PIXELS_PER_M)
                 py = int(cy - acc_x * PIXELS_PER_M)
                 pts.append((px, py))
             if len(pts) >= 2:
-                # *** APF 적용 여부에 따라 색상 변경 ***
                 if is_apf_applied:
-                    color = (
-                        (0, 0, 255) if i == 0 else (180, 0, 255)
-                    )  # Blue for main, purple for others
+                    color = (0, 0, 255) if i == 0 else (180, 0, 255)
                 else:
-                    color = (
-                        (0, 255, 0) if i == 0 else (255, 200, 0)
-                    )  # Original green and yellow
+                    color = (0, 255, 0) if i == 0 else (255, 200, 0)
 
                 cv2.polylines(viz, [np.array(pts, dtype=np.int32)], False, color, 1)
+            elif len(pts) == 1:
+                color = (0, 255, 0) if i == 0 else (255, 200, 0)
+                cv2.circle(viz, pts[0], 5, color, -1)
 
         img_msg = self.bridge.cv2_to_imgmsg(viz, encoding="rgb8")
         img_msg.header.stamp = self.get_clock().now().to_msg()
         self.viz_pub.publish(img_msg)
 
 
-def cv2_to_pil(cv2_img: np.ndarray) -> PILImage.Image:
-    rgb_img = cv2.cvtColor(cv2_img, cv2.COLOR_BGR2RGB)
-    pil_img = PILImage.fromarray(rgb_img)
-    pil_img.load()  # 이 줄을 추가해 lazy wrapper 제거
-    return pil_img
-
-
-# ---------------------------------------------------------------------------
-# ENTRY POINT
-# ---------------------------------------------------------------------------
-
-
 def main():
-    parser = argparse.ArgumentParser("Topological navigation (ROS 2)")
+    parser = argparse.ArgumentParser("Topological navigation with APF (ROS 2)")
     parser.add_argument("--model", "-m", default="nomad")
     parser.add_argument(
         "--dir", "-d", default="topomap", help="sub‑directory under ../topomaps/images/"
