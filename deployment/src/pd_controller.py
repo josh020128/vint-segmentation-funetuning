@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-"""pd_controller_ros2.py – ROS 2 version of the original PD controller node.
+"""pd_controller_ros2.py – ROS 2 version of the original PD controller node.
 
 Behaviour
 ---------
 * Listens to WAYPOINT_TOPIC (`Float32MultiArray`) and REACHED_GOAL_TOPIC (`Bool`).
 * Computes linear/angular velocity commands with a simple PD‑style heuristic.
 * Publishes geometry_msgs/Twist on the velocity topic defined in robot.yaml.
+* Continuously measures and reports distance traveled.
 
 Run after installing your Python package (or directly with `ros2 run` / `python`).
 """
@@ -41,11 +42,12 @@ DT: float = 1.0 / robot_cfg["frame_rate"]
 RATE: int = 9  # control loop Hz
 EPS: float = 1e-8
 WAYPOINT_TIMEOUT: float = 1.0  # seconds – drop stale waypoint
+DISTANCE_REPORT_INTERVAL: float = 0.1  # 이동 거리 보고 간격(초)
 
 
 # ────────────────────────────────────────────────────────────────────────────────
 class PDControllerNode(Node):
-    """ROS 2 node implementing a planar PD controller."""
+    """ROS 2 node implementing a planar PD controller."""
 
     def __init__(self, controller_type: str) -> None:
         super().__init__("pd_controller")
@@ -56,6 +58,12 @@ class PDControllerNode(Node):
         self._last_wp_time: float = 0.0
         self.reached_goal: bool = False
         self.reverse_mode: bool = False  # flip linear.x if required
+
+        # 이동 거리 측정을 위한 변수 추가
+        self.total_distance: float = 0.0
+        self.last_velocity_time: float = time.time()
+        self.last_report_time: float = time.time()
+        self.current_velocity: float = 0.0
 
         # pubs / subs
         self.vel_pub = self.create_publisher(Twist, VEL_TOPIC, 1)
@@ -74,10 +82,12 @@ class PDControllerNode(Node):
     def _waypoint_cb(self, msg: Float32MultiArray) -> None:
         self.waypoint = np.asarray(msg.data, dtype=float)
         self._last_wp_time = time.time()
-        self.get_logger().info(f"Waypoint received: {self.waypoint.tolist()}")
+        self.get_logger().debug(f"Waypoint received: {self.waypoint.tolist()}")
 
     def _goal_cb(self, msg: Bool) -> None:
         self.reached_goal = msg.data
+        if self.reached_goal:
+            self.get_logger().info(f"최종 이동 거리: {self.total_distance:.3f} 미터")
 
     # ─────────────────────── helpers ──────────────────────────
     def _waypoint_valid(self) -> bool:
@@ -96,18 +106,6 @@ class PDControllerNode(Node):
             use_heading = np.abs(dx) < EPS and np.abs(dy) < EPS
         else:
             raise ValueError("Waypoint must be 2‑D or 4‑D vector")
-
-        # # heading‑only case
-        # if wp.size == 4 and abs(dx) < EPS and abs(dy) < EPS:
-        #     v = 0.0
-        #     w = clip_angle(np.arctan2(hy, hx)) / DT
-        # # rotate in place when dx ≈ 0
-        # elif abs(dx) < EPS:
-        #     v = 0.0
-        #     w = np.sign(dy) * np.pi / (2 * DT)
-        # else:
-        #     v = dx / DT
-        #     w = np.arctan(dy / dx) / DT
 
         # === 각도 계산 ===
         if use_heading:
@@ -130,6 +128,25 @@ class PDControllerNode(Node):
 
         return float(np.clip(v, 0.0, MAX_V)), float(np.clip(w, -MAX_W, MAX_W))
 
+    def _update_distance(self, velocity: float) -> None:
+        """현재 속도를 기반으로 이동 거리 업데이트"""
+        current_time = time.time()
+        dt = current_time - self.last_velocity_time
+
+        # 현재 속도로 이동한 거리 계산 (속도 * 시간)
+        if velocity > 0.0:  # 양수 속도일 때만 거리 계산
+            distance = velocity * dt
+            self.total_distance += distance
+            if self.total_distance > 5.0:
+                self._goal_cb(Bool(data=True))  # 5m 이동 시 목표 도달로 간주
+
+        self.last_velocity_time = current_time
+
+        # 일정 간격으로 이동 거리 보고
+        if current_time - self.last_report_time >= DISTANCE_REPORT_INTERVAL:
+            self.get_logger().info(f"현재 이동 거리: {self.total_distance:.3f} 미터")
+            self.last_report_time = current_time
+
     # ─────────────────────── timer ────────────────────────────
     def _timer_cb(self) -> None:
         vel_msg = Twist()
@@ -146,7 +163,15 @@ class PDControllerNode(Node):
                 v *= -1.0
             vel_msg.linear.x = v
             vel_msg.angular.z = w
+
+            # 현재 속도 저장 및 이동 거리 업데이트
+            self.current_velocity = abs(v)  # 절대값 사용 (방향 무관)
+            self._update_distance(self.current_velocity)
+
             self.get_logger().debug(f"Publishing velocity: v={v:.3f}, w={w:.3f}")
+        else:
+            # waypoint가 없을 때도 이동 거리 업데이트 (속도 0으로)
+            self._update_distance(0.0)
 
         self.vel_pub.publish(vel_msg)
 
