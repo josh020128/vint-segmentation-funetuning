@@ -113,11 +113,18 @@ class ExplorationNode(Node):
         self.proximity_threshold = 0.8
         self.top_view_resolution = self.top_view_size[0] / self.proximity_threshold
         self.top_view_sampling_step = 5
-        self.safety_margin = 0.17
+        # self.safety_margin = 0.17
+
+        if args.robot == "locobot":
+            self.safety_margin = 0.0
+        elif args.robot == "robomaster":
+            self.safety_margin = -0.1
+        elif args.robot == "turtlebot4":
+            self.safety_margin = 0.17
 
         # 로봇 타입에 따른 이미지 크기 설정
         if args.robot == "locobot":
-            self.DIM = (640, 480)
+            self.DIM = (320, 240)
         elif args.robot == "robomaster":
             self.DIM = (640, 480)
         elif args.robot == "turtlebot4":
@@ -136,13 +143,8 @@ class ExplorationNode(Node):
             self.K = np.load("./UniDepth/assets/robomaster/intrinsics.npy")
             self.map1, self.map2 = None, None
         elif self.args.robot == "turtlebot4":
-            self.K = np.load("./UniDepth/assets/oakd/intrinsics.npy")
-            self.D = np.array(
-                [[0.01721098, 0.29320023, 0.01019189, -0.00321903, -0.74943285]]
-            )
-            self.map1, self.map2 = cv2.initUndistortRectifyMap(
-                self.K, self.D, None, self.K, self.DIM, cv2.CV_16SC2
-            )
+            self.K = np.load("./UniDepth/assets/turtlebot4/intrinsics.npy")
+            self.map1, self.map2 = None, None
         else:
             raise ValueError(f"Unsupported robot type: {self.args.robot}")
 
@@ -180,11 +182,9 @@ class ExplorationNode(Node):
             frame = cv2_img.copy()
             rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         elif self.args.robot == "turtlebot4":
+            frame = cv2_img.copy()
             frame = cv2.resize(cv2_img, self.DIM)
-            undistorted = cv2.remap(
-                frame, self.map1, self.map2, interpolation=cv2.INTER_LINEAR
-            )
-            rgb = cv2.cvtColor(undistorted, cv2.COLOR_BGR2RGB)
+            rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
 
         rgb_torch = (
             torch.from_numpy(rgb).permute(2, 0, 1).unsqueeze(0).float().to(self.device)
