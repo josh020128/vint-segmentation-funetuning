@@ -399,6 +399,10 @@ class NavigationNode(Node):
 
         traj_batch = to_numpy(get_action(naction))
 
+        is_apf_applied = (
+            self.obstacle_points is not None and len(self.obstacle_points) > 0
+        )
+
         # Repulsive force 적용
         self.original_trajectories = traj_batch.copy()
         traj_batch = self.apply_repulsive_forces_to_trajectories(traj_batch)
@@ -412,7 +416,7 @@ class NavigationNode(Node):
         # 3. Publish ROS messages
         # -----------------------------------------------------------------
         self._publish_msgs(traj_batch, chosen_waypoint)
-        self._publish_viz(traj_batch)
+        self._publish_viz(traj_batch, is_apf_applied)
         self._publish_goal_images(sg_pil, goal_pil)  # ← 호출
 
     # ------------------------------------------------------------------
@@ -450,8 +454,7 @@ class NavigationNode(Node):
         reached = bool(self.closest_node == self.goal_node)
         self.goal_pub.publish(Bool(data=reached))
 
-    def _publish_viz(self, traj_batch: np.ndarray):
-        # traj_batch *= MAX_V / RATE  # undo normalisation
+    def _publish_viz(self, traj_batch: np.ndarray, is_apf_applied: bool = False):
         frame = np.array(self.context_queue[-1])
         h, w = frame.shape[:2]
         viz = frame.copy()
@@ -469,7 +472,16 @@ class NavigationNode(Node):
                 py = int(cy - acc_x * PIXELS_PER_M)
                 pts.append((px, py))
             if len(pts) >= 2:
-                color = (0, 255, 0) if i == 0 else (255, 200, 0)
+                # *** APF 적용 여부에 따라 색상 변경 ***
+                if is_apf_applied:
+                    color = (
+                        (0, 0, 255) if i == 0 else (180, 0, 255)
+                    )  # Blue for main, purple for others
+                else:
+                    color = (
+                        (0, 255, 0) if i == 0 else (255, 200, 0)
+                    )  # Original green and yellow
+
                 cv2.polylines(viz, [np.array(pts, dtype=np.int32)], False, color, 1)
 
         img_msg = self.bridge.cv2_to_imgmsg(viz, encoding="rgb8")
