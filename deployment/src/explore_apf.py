@@ -85,7 +85,17 @@ class ExplorationNode(Node):
         self.context_queue: Deque[np.ndarray] = deque(maxlen=self.context_size + 1)
         self.bridge = CvBridge()
 
-        self.create_subscription(Image, IMAGE_TOPIC, self._image_cb, 1)
+        # 로봇 타입에 따른 이미지 토픽 선택
+        if args.robot == "locobot":
+            image_topic = "/camera/image"  # 상수에서 가져옴
+        elif args.robot == "robomaster":
+            image_topic = "/camera/image_color"
+        elif args.robot == "turtlebot4":
+            image_topic = "/robot2/oakd/rgb/preview/image_raw"
+        else:
+            raise ValueError(f"Unknown robot type: {args.robot}")
+
+        self.create_subscription(Image, image_topic, self._image_cb, 1)
         self.waypoint_pub = self.create_publisher(Float32MultiArray, WAYPOINT_TOPIC, 1)
         self.sampled_actions_pub = self.create_publisher(
             Float32MultiArray, SAMPLED_ACTIONS_TOPIC, 1
@@ -93,7 +103,9 @@ class ExplorationNode(Node):
         self.viz_pub = self.create_publisher(Image, "trajectory_viz", 1)
 
         self.create_timer(1.0 / RATE, self._timer_cb)
-        self.get_logger().info("Exploration node initialised. Waiting for images…")
+        self.get_logger().info(
+            f"Exploration node initialised for {args.robot}. Waiting for images…"
+        )
 
         self.current_waypoint = np.zeros(2)
         self.obstacle_points = None
@@ -102,15 +114,37 @@ class ExplorationNode(Node):
         self.top_view_resolution = self.top_view_size[0] / self.proximity_threshold
         self.top_view_sampling_step = 5
         self.safety_margin = 0.17
-        self.DIM = (640, 480)
+
+        # 로봇 타입에 따른 이미지 크기 설정
+        if args.robot == "locobot":
+            self.DIM = (640, 480)
+        elif args.robot == "robomaster":
+            self.DIM = (640, 480)
+        elif args.robot == "turtlebot4":
+            self.DIM = (320, 200)
+
         self._init_depth_model()
 
     def _init_depth_model(self):
-        self.K = np.load("./UniDepth/assets/fisheye/fisheye_intrinsics.npy")
-        self.D = np.load("./UniDepth/assets/fisheye/fisheye_distortion.npy")
-        self.map1, self.map2 = cv2.fisheye.initUndistortRectifyMap(
-            self.K, self.D, np.eye(3), self.K, self.DIM, cv2.CV_16SC2
-        )
+        if self.args.robot == "locobot":
+            self.K = np.load("./UniDepth/assets/fisheye/fisheye_intrinsics.npy")
+            self.D = np.load("./UniDepth/assets/fisheye/fisheye_distortion.npy")
+            self.map1, self.map2 = cv2.fisheye.initUndistortRectifyMap(
+                self.K, self.D, np.eye(3), self.K, self.DIM, cv2.CV_16SC2
+            )
+        elif self.args.robot == "robomaster":
+            self.K = np.load("./UniDepth/assets/robomaster/intrinsics.npy")
+            self.map1, self.map2 = None, None
+        elif self.args.robot == "turtlebot4":
+            self.K = np.load("./UniDepth/assets/oakd/intrinsics.npy")
+            self.D = np.array(
+                [[0.01721098, 0.29320023, 0.01019189, -0.00321903, -0.74943285]]
+            )
+            self.map1, self.map2 = cv2.initUndistortRectifyMap(
+                self.K, self.D, None, self.K, self.DIM, cv2.CV_16SC2
+            )
+        else:
+            raise ValueError(f"Unsupported robot type: {self.args.robot}")
 
         # self.intrinsics_torch = torch.from_numpy(self.K).unsqueeze(0).to(self.device)
         # self.camera = Pinhole(K=self.intrinsics_torch)
@@ -135,11 +169,23 @@ class ExplorationNode(Node):
 
         # depth 추론 및 장애물 저장
         cv2_img = self.bridge.imgmsg_to_cv2(msg)
-        frame = cv2.resize(cv2_img, self.DIM)
-        undistorted = cv2.remap(
-            frame, self.map1, self.map2, interpolation=cv2.INTER_LINEAR
-        )
-        rgb = cv2.cvtColor(undistorted, cv2.COLOR_BGR2RGB)
+
+        if self.args.robot == "locobot":
+            frame = cv2.resize(cv2_img, self.DIM)
+            undistorted = cv2.remap(
+                frame, self.map1, self.map2, interpolation=cv2.INTER_LINEAR
+            )
+            rgb = cv2.cvtColor(undistorted, cv2.COLOR_BGR2RGB)
+        elif self.args.robot == "robomaster":
+            frame = cv2_img.copy()
+            rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        elif self.args.robot == "turtlebot4":
+            frame = cv2.resize(cv2_img, self.DIM)
+            undistorted = cv2.remap(
+                frame, self.map1, self.map2, interpolation=cv2.INTER_LINEAR
+            )
+            rgb = cv2.cvtColor(undistorted, cv2.COLOR_BGR2RGB)
+
         rgb_torch = (
             torch.from_numpy(rgb).permute(2, 0, 1).unsqueeze(0).float().to(self.device)
         )
@@ -286,8 +332,6 @@ class ExplorationNode(Node):
         self.sampled_actions_pub.publish(sampled_actions_msg)
 
         chosen = traj_batch[0][self.args.waypoint]
-        # if self.model_params.get("normalize", False):
-        #     chosen *= MAX_V / RATE
         waypoint_msg = Float32MultiArray()
         waypoint_msg.data = [float(chosen[0]), float(chosen[1])]
         self.waypoint_pub.publish(waypoint_msg)
@@ -330,6 +374,13 @@ def main():
     parser.add_argument("--model", "-m", default="nomad")
     parser.add_argument("--waypoint", "-w", type=int, default=2)
     parser.add_argument("--num-samples", "-n", type=int, default=8)
+    parser.add_argument(
+        "--robot",
+        type=str,
+        default="locobot",
+        choices=["locobot", "robomaster", "turtlebot4"],
+        help="Robot type (locobot, robomaster, turtlebot4)",
+    )
     args = parser.parse_args()
 
     rclpy.init()
