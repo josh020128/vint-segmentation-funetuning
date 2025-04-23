@@ -113,7 +113,14 @@ class ExplorationNode(Node):
         self.proximity_threshold = 0.8
         self.top_view_resolution = self.top_view_size[0] / self.proximity_threshold
         self.top_view_sampling_step = 5
-        self.safety_margin = 0.17
+        # self.safety_margin = 0.17
+
+        if args.robot == "locobot":
+            self.safety_margin = 0.0
+        elif args.robot == "robomaster":
+            self.safety_margin = -0.1
+        elif args.robot == "turtlebot4":
+            self.safety_margin = 0.17
 
         # 로봇 타입에 따른 이미지 크기 설정
         if args.robot == "locobot":
