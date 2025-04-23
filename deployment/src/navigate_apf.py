@@ -112,7 +112,16 @@ class NavigationNode(Node):
         self.closest_node = 0
 
         # ROS interfaces -----------------------------------------------------
-        self.create_subscription(Image, IMAGE_TOPIC, self._image_cb, 1)
+        if args.robot == "locobot":
+            image_topic = "/camera/image"  # 상수에서 가져옴
+        elif args.robot == "robomaster":
+            image_topic = "/camera/image_color"
+        elif args.robot == "turtlebot4":
+            image_topic = "/robot2/oakd/rgb/preview/image_raw"  # 적절한 토픽으로 변경
+        else:
+            raise ValueError(f"Unknown robot type: {args.robot}")
+
+        self.create_subscription(Image, image_topic, self._image_cb, 1)
         self.waypoint_pub = self.create_publisher(Float32MultiArray, WAYPOINT_TOPIC, 1)
         self.sampled_actions_pub = self.create_publisher(
             Float32MultiArray, SAMPLED_ACTIONS_TOPIC, 1
@@ -137,11 +146,19 @@ class NavigationNode(Node):
         return [PILImage.open(dpath / f) for f in img_files]
 
     def _init_depth_model(self):
-        self.K = np.load("./UniDepth/assets/fisheye/fisheye_intrinsics.npy")
-        self.D = np.load("./UniDepth/assets/fisheye/fisheye_distortion.npy")
-        self.map1, self.map2 = cv2.fisheye.initUndistortRectifyMap(
-            self.K, self.D, np.eye(3), self.K, self.DIM, cv2.CV_16SC2
-        )
+        if self.args.robot == "locobot":
+            self.K = np.load("./UniDepth/assets/fisheye/fisheye_intrinsics.npy")
+            self.D = np.load("./UniDepth/assets/fisheye/fisheye_distortion.npy")
+            self.map1, self.map2 = cv2.fisheye.initUndistortRectifyMap(
+                self.K, self.D, np.eye(3), self.K, self.DIM, cv2.CV_16SC2
+            )
+        elif self.args.robot == "robomaster":
+            self.K = np.load("./UniDepth/assets/robomaster/intrinsics.npy")
+        elif self.args.robot == "turtlebot4":
+            self.K = np.load("./UniDepth/assets/robomaster/intrinsics.npy")
+        else:
+            raise ValueError(f"Unsupported robot type: {self.args.robot}")
+
         # self.intrinsics_torch = torch.from_numpy(self.K).unsqueeze(0).to(self.device)
         # self.camera = Pinhole(K=self.intrinsics_torch)
         self.depth_model = (
@@ -155,21 +172,28 @@ class NavigationNode(Node):
     # ------------------------------------------------------------------
 
     def _image_cb(self, msg: Image):
-
         now = self.get_clock().now()
         if (now - self.last_ctx_time).nanoseconds < self.ctx_dt * 1e9:
-            return  # 아직 0.25 s 안 지났으면 무시
+            return
         self.context_queue.append(msg_to_pil(msg))
         self.last_ctx_time = now
 
         cv2_img = self.bridge.imgmsg_to_cv2(msg)
-        pil_img = cv2_to_pil(cv2_img)
 
-        frame = cv2.resize(cv2_img, self.DIM)
-        undistorted = cv2.remap(
-            frame, self.map1, self.map2, interpolation=cv2.INTER_LINEAR
-        )
-        rgb = cv2.cvtColor(undistorted, cv2.COLOR_BGR2RGB)
+        if self.args.robot == "locobot":
+            frame = cv2.resize(cv2_img, self.DIM)
+            undistorted = cv2.remap(
+                frame, self.map1, self.map2, interpolation=cv2.INTER_LINEAR
+            )
+            rgb = cv2.cvtColor(undistorted, cv2.COLOR_BGR2RGB)
+        elif self.args.robot == "robomaster":
+            frame = cv2_img.copy()
+            rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        elif self.args.robot == "turtlebot4":
+            frame = cv2_img.copy()
+            rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            pass
+
         rgb_torch = (
             torch.from_numpy(rgb).permute(2, 0, 1).unsqueeze(0).float().to(self.device)
         )
@@ -463,6 +487,14 @@ def main():
     parser.add_argument("--close-threshold", "-t", type=float, default=3.0)
     parser.add_argument("--radius", "-r", type=int, default=4)
     parser.add_argument("--num-samples", "-n", type=int, default=8)
+    parser.add_argument(
+        "--robot",
+        "-r",
+        type=str,
+        default="locobot",
+        choices=["locobot", "robomaster", "turtlebot4"],
+        help="Robot type (locobot, robomaster, turtlebot4)",
+    )
     args = parser.parse_args()
 
     rclpy.init()

@@ -274,7 +274,7 @@ class ExplorationNode(Node):
                 ]
             )
             updated_trajs[i] = (rotation_matrix @ updated_trajs[i].T).T
-        return updated_trajs
+        return updated_trajs * (MAX_V / RATE)
 
     def _timer_cb(self):
         if len(self.context_queue) <= self.context_size:
