@@ -214,6 +214,7 @@ class NavigationNode(Node):
             rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         elif self.args.robot == "turtlebot4":
             frame = cv2_img.copy()
+            frame = cv2.resize(cv2_img, self.DIM)
             rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
 
         rgb_torch = (
