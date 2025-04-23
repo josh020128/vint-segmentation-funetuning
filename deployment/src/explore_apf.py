@@ -110,17 +110,23 @@ class ExplorationNode(Node):
         self.current_waypoint = np.zeros(2)
         self.obstacle_points = None
         self.top_view_size = (400, 400)
-        self.proximity_threshold = 0.8
-        self.top_view_resolution = self.top_view_size[0] / self.proximity_threshold
-        self.top_view_sampling_step = 5
+        # self.proximity_threshold = 0.8
         # self.safety_margin = 0.17
 
         if args.robot == "locobot":
-            self.safety_margin = 0.0
+            self.safety_margin = 0.05
+            self.proximity_threshold = 0.8
         elif args.robot == "robomaster":
             self.safety_margin = -0.1
+            self.proximity_threshold = 0.8
         elif args.robot == "turtlebot4":
-            self.safety_margin = 0.17
+            self.safety_margin = 0.1
+            self.proximity_threshold = 1.0
+        else:
+            raise ValueError(f"Unsupported robot type: {self.args.robot}")
+
+        self.top_view_resolution = self.top_view_size[0] / self.proximity_threshold
+        self.top_view_sampling_step = 5
 
         # 로봇 타입에 따른 이미지 크기 설정
         if args.robot == "locobot":
@@ -131,6 +137,12 @@ class ExplorationNode(Node):
             self.DIM = (320, 200)
 
         self._init_depth_model()
+        # print all parameters
+        # self.get_logger().info(f"Model parameters: {self.model_params}")
+        self.get_logger().info(f"Robot parameters: {ROBOT_CONF}")
+        self.get_logger().info(f"Safety margin: {self.safety_margin}")
+        self.get_logger().info(f"Proximity threshold: {self.proximity_threshold}")
+        self.get_logger().info(f"Image size: {self.DIM}")
 
     def _init_depth_model(self):
         if self.args.robot == "locobot":
@@ -151,7 +163,7 @@ class ExplorationNode(Node):
         # self.intrinsics_torch = torch.from_numpy(self.K).unsqueeze(0).to(self.device)
         # self.camera = Pinhole(K=self.intrinsics_torch)
         self.depth_model = (
-            UniDepthV2.from_pretrained("lpiccinelli/unidepth-v2-vitb14")
+            UniDepthV2.from_pretrained("lpiccinelli/unidepth-v2-vits14")
             .to(self.device)
             .eval()
         )
@@ -174,10 +186,10 @@ class ExplorationNode(Node):
 
         if self.args.robot == "locobot":
             frame = cv2.resize(cv2_img, self.DIM)
-            undistorted = cv2.remap(
-                frame, self.map1, self.map2, interpolation=cv2.INTER_LINEAR
-            )
-            rgb = cv2.cvtColor(undistorted, cv2.COLOR_BGR2RGB)
+            # undistorted = cv2.remap(
+            #     frame, self.map1, self.map2, interpolation=cv2.INTER_LINEAR
+            # )
+            rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         elif self.args.robot == "robomaster":
             frame = cv2_img.copy()
             rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
