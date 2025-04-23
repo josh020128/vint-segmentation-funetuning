@@ -100,7 +100,7 @@ class NavigationNode(Node):
         self.top_view_resolution = self.top_view_size[0] / self.proximity_threshold
         self.top_view_sampling_step = 5
         self.safety_margin = 0.17
-        self.DIM = (640, 480)
+        self.DIM = (320, 240)  # (640, 480)
 
         self._init_depth_model()
 
