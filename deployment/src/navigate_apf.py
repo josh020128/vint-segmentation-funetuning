@@ -516,7 +516,6 @@ def main():
     parser.add_argument("--num-samples", "-n", type=int, default=8)
     parser.add_argument(
         "--robot",
-        "-r",
         type=str,
         default="locobot",
         choices=["locobot", "robomaster", "turtlebot4"],
