@@ -41,7 +41,7 @@ MAX_W = ROBOT_CONF["max_w"]
 RATE = ROBOT_CONF["frame_rate"]  # Hz
 
 # Visualisation -------------------------------------------------------------
-PIXELS_PER_M = 40.0  # px for 1 m (feel free to tune)
+PIXELS_PER_M = 60.0  # px for 1 m (feel free to tune)
 ORIGIN_Y_RATIO = 0.95  # where to anchor trajectories vertically
 
 # ---------------------------------------------------------------------------
