@@ -114,7 +114,8 @@ def load_model(
 def msg_to_pil(msg: Image) -> PILImage.Image:
     img = np.frombuffer(msg.data, dtype=np.uint8).reshape(
         msg.height, msg.width, -1)
-    pil_image = PILImage.fromarray(img)
+    img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+    pil_image = PILImage.fromarray(img_rgb)
     return pil_image
 
 
