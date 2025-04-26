@@ -501,7 +501,7 @@ class NavigationNode(Node):
         # 3. Publish ROS messages
         # -----------------------------------------------------------------
         self._publish_msgs(traj_batch, chosen_waypoint)
-        self._publish_viz(traj_batch, is_apf_applied)
+        self._publish_viz_image(traj_batch, is_apf_applied)
         self._publish_goal_images(sg_pil, goal_pil)
 
     def _timer_cb_other(self):
@@ -615,7 +615,7 @@ class NavigationNode(Node):
             # if self.model_params.get("normalize", False):
             #     traj_vis *= MAX_V / RATE
 
-            self._publish_viz(traj_for_viz, False)
+            self._publish_viz_image(traj_for_viz, is_apf_applied)
 
         # 목표 이미지 발행
         self._publish_goal_images(sg_pil, goal_pil)
@@ -644,35 +644,60 @@ class NavigationNode(Node):
         reached = bool(self.closest_node == self.goal_node)
         self.goal_pub.publish(Bool(data=reached))
 
-    def _publish_viz(self, traj_batch: np.ndarray, is_apf_applied: bool = False):
-        frame = np.array(self.context_queue[-1])
-        h, w = frame.shape[:2]
+    def _publish_viz_image(self, traj_batch: np.ndarray, is_apf_applied: bool = False):
+        frame = np.array(self.context_queue[-1])  # latest RGB frame
+        img_h, img_w = frame.shape[:2]
         viz = frame.copy()
 
-        cx = w // 2
-        cy = int(h * ORIGIN_Y_RATIO)
+        cx = img_w // 2
+        cy = int(img_h * 0.95)
 
+        # 수정사항:
+        pixels_per_m = 3.0
+        lateral_scale = 1.0
+        robot_symbol_length = 10
+
+        cv2.line(
+            viz,
+            (cx - robot_symbol_length, cy),
+            (cx + robot_symbol_length, cy),
+            (255, 0, 0),
+            2,
+        )  # Blue
+        cv2.line(
+            viz,
+            (cx, cy - robot_symbol_length),
+            (cx, cy + robot_symbol_length),
+            (255, 0, 0),
+            2,
+        )  # Blue
+
+        # Draw each trajectory
         for i, traj in enumerate(traj_batch):
             pts = []
-            acc_x = acc_y = 0.0
+            # 첫 점을 로봇 위치(cx, cy)에서 시작하도록 수정
+            pts.append((cx, cy))  # 시작점은 로봇의 현재 위치
+
+            acc_x, acc_y = 0.0, 0.0
             for dx, dy in traj:
-                if np.isnan(dx) or np.isnan(dy):
-                    continue
                 acc_x += dx
                 acc_y += dy
-                px = int(cx - dy * PIXELS_PER_M)
-                py = int(cy - acc_x * PIXELS_PER_M)
+                # lateral_scale 적용하여 좌우로 더 넓게
+                px = int(cx - acc_y * pixels_per_m * lateral_scale)  # acc_y 사용
+                py = int(cy - acc_x * pixels_per_m * 6.0)
                 pts.append((px, py))
-            if len(pts) >= 2:
-                if is_apf_applied:
-                    color = (0, 0, 255) if i == 0 else (180, 0, 255)
-                else:
-                    color = (0, 255, 0) if i == 0 else (255, 200, 0)
 
-                cv2.polylines(viz, [np.array(pts, dtype=np.int32)], False, color, 1)
-            elif len(pts) == 1:
-                color = (0, 255, 0) if i == 0 else (255, 200, 0)
-                cv2.circle(viz, pts[0], 5, color, -1)
+            if len(pts) >= 2:
+                # Change colors when APF is applied
+                if is_apf_applied:
+                    color = (
+                        (0, 0, 255) if i == 0 else (180, 0, 255)
+                    )  # Blue for main, purple for others
+                else:
+                    color = (
+                        (0, 255, 0) if i == 0 else (255, 200, 0)
+                    )  # Original green and yellow
+                cv2.polylines(viz, [np.array(pts, dtype=np.int32)], False, color, 2)
 
         img_msg = self.bridge.cv2_to_imgmsg(viz, encoding="rgb8")
         img_msg.header.stamp = self.get_clock().now().to_msg()

@@ -265,7 +265,6 @@ class ExplorationNode(Node):
                 color = (
                     (0, 255, 0) if i == 0 else (255, 200, 0)
                 )  # 첫 번째 trajectory는 녹색
-                color = (255, 200, 0)
                 cv2.polylines(viz, [np.array(pts, dtype=np.int32)], False, color, 2)
 
         img_msg = self.bridge.cv2_to_imgmsg(viz, encoding="rgb8")

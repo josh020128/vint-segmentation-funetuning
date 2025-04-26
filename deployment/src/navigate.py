@@ -472,7 +472,6 @@ class NavigationNode(Node):
         # 수정사항:
         pixels_per_m = 3.0
         lateral_scale = 1.0
-        horizontal_scale = 4.0
         robot_symbol_length = 10
 
         cv2.line(
@@ -502,7 +501,7 @@ class NavigationNode(Node):
                 acc_y += dy
                 # 수정: acc_y를 사용하여 누적값으로 계산
                 px = int(cx - acc_y * pixels_per_m * lateral_scale)
-                py = int(cy - acc_x * pixels_per_m * horizontal_scale)
+                py = int(cy - acc_x * pixels_per_m)
                 pts.append((px, py))
 
             if len(pts) >= 2:

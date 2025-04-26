@@ -446,7 +446,6 @@ class ExplorationNode(Node):
                     color = (
                         (0, 0, 255) if i == 0 else (180, 0, 255)
                     )  # Blue for main, purple for others
-                    color = (180, 0, 255)
                 else:
                     color = (
                         (0, 255, 0) if i == 0 else (255, 200, 0)
