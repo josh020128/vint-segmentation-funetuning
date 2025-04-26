@@ -40,13 +40,6 @@ MAX_V = ROBOT_CONF["max_v"]
 MAX_W = ROBOT_CONF["max_w"]
 RATE = ROBOT_CONF["frame_rate"]  # Hz
 
-# Visualisation -------------------------------------------------------------
-PIXELS_PER_M = 60.0  # px for 1 m (feel free to tune)
-ORIGIN_Y_RATIO = 0.95  # where to anchor trajectories vertically
-
-# ---------------------------------------------------------------------------
-
-
 def _load_model(model_name: str, device: torch.device):
     with open(MODEL_CONFIG_PATH, "r") as f:
         model_paths = yaml.safe_load(f)
@@ -92,7 +85,7 @@ class NavigationNode(Node):
             )
 
         self.bridge = CvBridge()
-        self.context_queue: Deque[np.ndarray] = deque(maxlen=self.context_size + 1)
+        self.context_queue = deque(maxlen=self.context_size + 1)
         self.last_ctx_time = self.get_clock().now()
         self.ctx_dt = 0.25
 
@@ -254,7 +247,7 @@ class NavigationNode(Node):
         # 3. Publish ROS messages
         # -----------------------------------------------------------------
         self._publish_msgs(traj_batch)
-        self._publish_viz(traj_batch)
+        self._publish_viz_image(traj_batch)
         self._publish_goal_images(sg_pil, goal_pil)
 
     def _timer_cb_other(self):
@@ -303,7 +296,6 @@ class NavigationNode(Node):
             selected_waypoints = waypoints_np[next_idx]  # 시각화용 전체 웨이포인트 저장
             self.closest_node = min(start + min_dist_idx + 1, self.goal_node)
 
-        # 정규화 적용 (원본과 동일)
         if self.model_params.get("normalize", False):
             chosen_waypoint[:2] *= MAX_V / RATE
 
@@ -334,10 +326,10 @@ class NavigationNode(Node):
                 traj_vis[0, i] = selected_waypoints[i][:2]
 
             # 정규화가 적용된 경우 시각화를 위해 정규화 적용
-            if self.model_params.get("normalize", False):
-                traj_vis *= MAX_V / RATE
+            # if self.model_params.get("normalize", False):
+            #     traj_vis *= MAX_V / RATE
 
-            self._publish_viz(traj_vis)
+            self._publish_viz_image(traj_vis)
 
         # 목표 이미지 발행
         self._publish_goal_images(sg_pil, goal_pil)
@@ -375,44 +367,55 @@ class NavigationNode(Node):
         reached = bool(self.closest_node == self.goal_node)
         self.goal_pub.publish(Bool(data=reached))
 
-    def _publish_viz(self, traj_batch: np.ndarray):
-        """경로 시각화 및 출력. NOMAD 및 다른 모델 형식에 모두 호환되도록 수정"""
-        if self.model_params.get("normalize", False):
-            # 이미 정규화되어 있는 경우만 적용
-            # _timer_cb_other에서는 이미 정규화를 처리하므로 중복 적용하지 않음
-            if self.model_params["model_type"] == "nomad":
-                traj_batch *= MAX_V / RATE  # 정규화 해제
-
-        frame = np.array(self.context_queue[-1])
-        h, w = frame.shape[:2]
+    def _publish_viz_image(self, traj_batch: np.ndarray):
+        frame = np.array(self.context_queue[-1])  # latest RGB frame
+        img_h, img_w = frame.shape[:2]
         viz = frame.copy()
 
-        cx = w // 2
-        cy = int(h * ORIGIN_Y_RATIO)
+        cx = img_w // 2
+        cy = int(img_h * 0.95)
 
+        # 수정사항:
+        pixels_per_m = 3.0
+        lateral_scale = 1.0
+        horizontal_scale = 4.0
+        robot_symbol_length = 10
+
+        cv2.line(
+            viz,
+            (cx - robot_symbol_length, cy),
+            (cx + robot_symbol_length, cy),
+            (255, 0, 0),
+            2,
+        )
+        cv2.line(
+            viz,
+            (cx, cy - robot_symbol_length),
+            (cx, cy + robot_symbol_length),
+            (255, 0, 0),
+            2,
+        )
+
+        # Draw each trajectory
         for i, traj in enumerate(traj_batch):
             pts = []
-            acc_x = acc_y = 0.0
+            # 수정: 첫 점을 로봇 위치(cx, cy)에서 시작
+            pts.append((cx, cy))
 
+            acc_x, acc_y = 0.0, 0.0
             for dx, dy in traj:
-                # 가끔 NaN 값이 있을 수 있으므로 체크
-                if np.isnan(dx) or np.isnan(dy):
-                    continue
-
                 acc_x += dx
                 acc_y += dy
-                px = int(cx - dy * PIXELS_PER_M)
-                py = int(cy - acc_x * PIXELS_PER_M)
+                # 수정: acc_y를 사용하여 누적값으로 계산
+                px = int(cx - acc_y * pixels_per_m * lateral_scale)
+                py = int(cy - acc_x * pixels_per_m * horizontal_scale)
                 pts.append((px, py))
 
-            # 최소 2개 이상의 포인트가 있어야 선을 그릴 수 있음
             if len(pts) >= 2:
-                color = (0, 255, 0) if i == 0 else (255, 200, 0)
-                cv2.polylines(viz, [np.array(pts, dtype=np.int32)], False, color, 1)
-            # 단일 포인트인 경우 원으로 표시
-            elif len(pts) == 1:
-                color = (0, 255, 0) if i == 0 else (255, 200, 0)
-                cv2.circle(viz, pts[0], 5, color, -1)
+                color = (
+                    (0, 255, 0) if i == 0 else (255, 200, 0)
+                )  # 첫 번째 trajectory는 녹색
+                cv2.polylines(viz, [np.array(pts, dtype=np.int32)], False, color, 2)
 
         img_msg = self.bridge.cv2_to_imgmsg(viz, encoding="rgb8")
         img_msg.header.stamp = self.get_clock().now().to_msg()

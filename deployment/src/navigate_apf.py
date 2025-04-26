@@ -197,6 +197,7 @@ class NavigationNode(Node):
     def _image_cb(self, msg: Image):
         now = self.get_clock().now()
         if (now - self.last_ctx_time).nanoseconds < self.ctx_dt * 1e9:
+            self.get_logger().info(f"Context queue length: {len(self.context_queue)}")
             return
         self.context_queue.append(msg_to_pil(msg))
         self.last_ctx_time = now
@@ -333,9 +334,6 @@ class NavigationNode(Node):
 
     def _timer_cb(self):
         if len(self.context_queue) <= self.context_size:
-            self.get_logger().info(
-                f"Waiting for context images… {len(self.context_queue)}/{self.context_size}"
-            )
             return
 
         # 모델 타입에 따라 다른 처리

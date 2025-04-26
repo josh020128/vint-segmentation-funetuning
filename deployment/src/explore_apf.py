@@ -35,11 +35,6 @@ MAX_V = ROBOT_CONF["max_v"]
 MAX_W = ROBOT_CONF["max_w"]
 RATE = ROBOT_CONF["frame_rate"]  # Hz
 
-# Visualisation tuning -------------------------------------------------------
-PIXELS_PER_M = 60.0  # ↓ smaller → shorter drawn trajectories
-ORIGIN_Y_RATIO = 0.95  # 1.0 = very bottom, 0.0 = very top
-# ----------------------------------------------------------------------------
-
 
 def _load_model(model_name: str, device: torch.device):
     with open(MODEL_CONFIG_PATH, "r") as f:
@@ -195,7 +190,7 @@ class ExplorationNode(Node):
             rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         elif self.args.robot == "turtlebot4":
             frame = cv2_img.copy()
-            frame = cv2.resize(cv2_img, self.DIM)
+            # frame = cv2.resize(cv2_img, self.DIM)
             rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
 
         rgb_torch = (
@@ -264,7 +259,7 @@ class ExplorationNode(Node):
         self, trajectories: np.ndarray
     ) -> np.ndarray:
         if self.obstacle_points is None or len(self.obstacle_points) == 0:
-            return trajectories * (MAX_V / RATE)
+            return trajectories
 
         updated_trajs = trajectories.copy()
         for i in range(updated_trajs.shape[0]):
@@ -286,7 +281,7 @@ class ExplorationNode(Node):
                 ]
             )
             updated_trajs[i] = (rotation_matrix @ updated_trajs[i].T).T
-        return updated_trajs * (MAX_V / RATE)
+        return updated_trajs
 
     def _timer_cb(self):
         if len(self.context_queue) <= self.context_size:
@@ -361,17 +356,41 @@ class ExplorationNode(Node):
         viz = frame.copy()
 
         cx = img_w // 2
-        cy = int(img_h * ORIGIN_Y_RATIO)
+        cy = int(img_h * 0.95)
+
+        # 수정사항:
+        pixels_per_m = 3.0
+        lateral_scale = 1.0
+        robot_symbol_length = 10
+
+        cv2.line(
+            viz,
+            (cx - robot_symbol_length, cy),
+            (cx + robot_symbol_length, cy),
+            (255, 0, 0),
+            2,
+        )  # Blue
+        cv2.line(
+            viz,
+            (cx, cy - robot_symbol_length),
+            (cx, cy + robot_symbol_length),
+            (255, 0, 0),
+            2,
+        )  # Blue
 
         # Draw each trajectory
         for i, traj in enumerate(traj_batch):
             pts = []
+            # 첫 점을 로봇 위치(cx, cy)에서 시작하도록 수정
+            pts.append((cx, cy))  # 시작점은 로봇의 현재 위치
+
             acc_x, acc_y = 0.0, 0.0
             for dx, dy in traj:
                 acc_x += dx
                 acc_y += dy
-                px = int(cx - dy * PIXELS_PER_M)
-                py = int(cy - acc_x * PIXELS_PER_M)
+                # lateral_scale 적용하여 좌우로 더 넓게
+                px = int(cx - acc_y * pixels_per_m * lateral_scale)  # acc_y 사용
+                py = int(cy - acc_x * pixels_per_m)
                 pts.append((px, py))
 
             if len(pts) >= 2:
@@ -380,12 +399,12 @@ class ExplorationNode(Node):
                     color = (
                         (0, 0, 255) if i == 0 else (180, 0, 255)
                     )  # Blue for main, purple for others
+                    color = (180, 0, 255)
                 else:
                     color = (
                         (0, 255, 0) if i == 0 else (255, 200, 0)
                     )  # Original green and yellow
-
-                cv2.polylines(viz, [np.array(pts, dtype=np.int32)], False, color, 1)
+                cv2.polylines(viz, [np.array(pts, dtype=np.int32)], False, color, 2)
 
         img_msg = self.bridge.cv2_to_imgmsg(viz, encoding="rgb8")
         img_msg.header.stamp = self.get_clock().now().to_msg()
