@@ -44,7 +44,7 @@ RATE: int = 9  # control loop Hz
 EPS: float = 1e-8
 WAYPOINT_TIMEOUT: float = 1.0  # seconds – drop stale waypoint
 DISTANCE_REPORT_INTERVAL: float = 0.1  # 이동 거리 보고 간격(초)
-MAX_TIME: float = 300.0  # 최대 실행 시간 (1분)
+MAX_TIME: float = 30000.0  # 최대 실행 시간 (1분)
 
 
 # ────────────────────────────────────────────────────────────────────────────────
