@@ -101,13 +101,13 @@ class NavigationNode(Node):
 
         if args.robot == "locobot":
             self.safety_margin = 0.05
-            self.proximity_threshold = 0.8
+            self.proximity_threshold = 1.0
         elif args.robot == "robomaster":
             self.safety_margin = -0.1
-            self.proximity_threshold = 0.8
+            self.proximity_threshold = 1.3
         elif args.robot == "turtlebot4":
-            self.safety_margin = 0.1
-            self.proximity_threshold = 1.0
+            self.safety_margin = 0.2
+            self.proximity_threshold = 1.5
         else:
             raise ValueError(f"Unsupported robot type: {self.args.robot}")
 
