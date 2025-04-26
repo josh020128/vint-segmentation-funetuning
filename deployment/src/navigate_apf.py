@@ -547,14 +547,50 @@ class NavigationNode(Node):
             selected_waypoints = waypoints_np[next_idx]
             self.closest_node = min(start + min_dist_idx + 1, self.goal_node)
 
-        # 정규화 적용
-        if self.model_params.get("normalize", False):
-            chosen_waypoint[:2] *= MAX_V / RATE
+        # 단일 궤적 생성 (APF 적용을 위해)
+        traj_len = len(selected_waypoints)
+        single_traj = np.zeros((traj_len, 2))
+
+        # 모델이 생성한 원래 궤적
+        for i in range(traj_len):
+            single_traj[i] = selected_waypoints[i][:2]
+
+        # 원본 궤적 저장
+        self.original_trajectories = single_traj.copy()
+
+        # APF가 적용될 수 있는지 확인
+        is_apf_applied = (
+            self.obstacle_points is not None and len(self.obstacle_points) > 0
+        )
+
+        # 단일 궤적에 대한 APF(Artificial Potential Field) 적용
+        if is_apf_applied:
+            # 단일 궤적을 형태만 맞춰서 필요한 함수에 전달
+            traj_batch = np.expand_dims(single_traj, axis=0)
+            traj_batch = self.apply_repulsive_forces_to_trajectories(traj_batch)
+            # 결과에서 다시 단일 궤적 추출
+            single_traj = traj_batch[0]
+
+        # 선택한 waypoint
+        chosen_waypoint = single_traj[self.args.waypoint]
+        self.current_waypoint = chosen_waypoint
+
+        # # 정규화 적용
+        # if self.model_params.get("normalize", False):
+        #     chosen_waypoint[:2] *= MAX_V / RATE
+
+        # 4차원 형태의 waypoint 메시지 생성
+        full_waypoint = np.zeros(4)
+        full_waypoint[:2] = chosen_waypoint
 
         # waypoint 메시지 발행
         waypoint_msg = Float32MultiArray()
-        waypoint_msg.data = chosen_waypoint.tolist()
+        # waypoint_msg.data = chosen_waypoint.tolist()
+        waypoint_msg.data = full_waypoint.tolist()
         self.waypoint_pub.publish(waypoint_msg)
+
+        # 시각화를 위해 형식 맞추기
+        traj_for_viz = np.expand_dims(single_traj, axis=0)
 
         # 목표 도달 상태 발행
         reached_goal = bool(self.closest_node == self.goal_node)
@@ -572,14 +608,14 @@ class NavigationNode(Node):
 
         # 시각화를 위한 궤적 생성
         if selected_waypoints is not None:
-            traj_vis = np.zeros((1, len(selected_waypoints), 2))
-            for i in range(len(selected_waypoints)):
-                traj_vis[0, i] = selected_waypoints[i][:2]
+            # traj_vis = np.zeros((1, len(selected_waypoints), 2))
+            # for i in range(len(selected_waypoints)):
+            #     traj_vis[0, i] = selected_waypoints[i][:2]
 
-            if self.model_params.get("normalize", False):
-                traj_vis *= MAX_V / RATE
+            # if self.model_params.get("normalize", False):
+            #     traj_vis *= MAX_V / RATE
 
-            self._publish_viz(traj_vis, False)  # APF는 non-nomad 모델에서 사용하지 않음
+            self._publish_viz(traj_for_viz, False)
 
         # 목표 이미지 발행
         self._publish_goal_images(sg_pil, goal_pil)
