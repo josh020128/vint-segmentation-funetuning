@@ -77,7 +77,17 @@ class ExplorationNode(Node):
         self.context_queue: Deque[np.ndarray] = deque(maxlen=self.context_size + 1)
         self.bridge = CvBridge()
 
-        self.create_subscription(Image, IMAGE_TOPIC, self._image_cb, 1)
+        # 로봇 타입에 따른 이미지 토픽 선택
+        if args.robot == "locobot":
+            image_topic = "/camera/image"  # 상수에서 가져옴
+        elif args.robot == "robomaster":
+            image_topic = "/camera/image_color"
+        elif args.robot == "turtlebot4":
+            image_topic = "/robot2/oakd/rgb/preview/image_raw"
+        else:
+            raise ValueError(f"Unknown robot type: {args.robot}")
+
+        self.create_subscription(Image, image_topic, self._image_cb, 1)
         self.waypoint_pub = self.create_publisher(Float32MultiArray, WAYPOINT_TOPIC, 1)
         self.sampled_actions_pub = self.create_publisher(
             Float32MultiArray, SAMPLED_ACTIONS_TOPIC, 1
@@ -226,6 +236,13 @@ def main():
     parser.add_argument("--model", "-m", default="nomad")
     parser.add_argument("--waypoint", "-w", type=int, default=2)
     parser.add_argument("--num-samples", "-n", type=int, default=8)
+    parser.add_argument(
+        "--robot",
+        type=str,
+        default="locobot",
+        choices=["locobot", "robomaster", "turtlebot4"],
+        help="Robot type (locobot, robomaster, turtlebot4)",
+    )
     args = parser.parse_args()
 
     rclpy.init()
