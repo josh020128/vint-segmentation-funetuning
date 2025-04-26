@@ -52,7 +52,7 @@ def _load_model(model_name: str, device: torch.device):
     if not os.path.exists(ckpt_path):
         raise FileNotFoundError(f"Model weights not found at {ckpt_path}")
 
-    print(f"[INFO] Loading model from {ckpt_path}")
+    print(f"Loading model from {ckpt_path}")
     model = load_model(ckpt_path, model_params, device).to(device).eval()
     return model, model_params
 
@@ -131,7 +131,90 @@ class NavigationNode(Node):
         self.create_timer(1.0 / RATE, self._timer_cb)
         self.get_logger().info("Navigation node initialised. Waiting for images…")
 
-        # ------------------------------------------------------------------
+        # 시작하기 전에 중요한 파라미터들 출력
+        self.get_logger().info("=" * 60)
+        self.get_logger().info("NAVIGATION NODE PARAMETERS")
+        self.get_logger().info("=" * 60)
+        self.get_logger().info(f"Robot type: {self.args.robot}")
+        self.get_logger().info(f"Image topic: {image_topic}")
+        self.get_logger().info("-" * 60)
+        self.get_logger().info("ROBOT CONFIGURATION:")
+        self.get_logger().info(f"  - Max linear velocity: {MAX_V} m/s")
+        self.get_logger().info(f"  - Max angular velocity: {MAX_W} rad/s")
+        self.get_logger().info(f"  - Frame rate: {RATE} Hz")
+        self.get_logger().info(f"  - Safety margin: {self.safety_margin} m")
+        self.get_logger().info(f"  - Proximity threshold: {self.proximity_threshold} m")
+        self.get_logger().info("-" * 60)
+        self.get_logger().info("CAMERA CONFIGURATION:")
+        self.get_logger().info(f"  - Image dimensions: {self.DIM}")
+        self.get_logger().info(f"  - Camera matrix (K):\n{self.K}")
+        self.get_logger().info(f"  - Distortion coefficients (D):\n{self.D}")
+        self.get_logger().info("-" * 60)
+        self.get_logger().info("MODEL CONFIGURATION:")
+        self.get_logger().info(f"  - Model name: {self.args.model}")
+        self.get_logger().info(f"  - Model type: {self.model_params['model_type']}")
+        self.get_logger().info(f"  - Device: {self.device}")
+        self.get_logger().info(f"  - Context size: {self.context_size}")
+        self.get_logger().info(f"  - Context update interval: {self.ctx_dt} seconds")
+        if self.model_params["model_type"] == "nomad":
+            self.get_logger().info(
+                f"  - Trajectory length: {self.model_params['len_traj_pred']}"
+            )
+            self.get_logger().info(
+                f"  - Diffusion iterations: {self.model_params['num_diffusion_iters']}"
+            )
+        self.get_logger().info(f"  - Image size: {self.model_params['image_size']}")
+        self.get_logger().info(
+            f"  - Normalize: {self.model_params.get('normalize', False)}"
+        )
+        self.get_logger().info("-" * 60)
+        self.get_logger().info("DEPTH MODEL CONFIGURATION:")
+        self.get_logger().info(f"  - UniDepth model: UniDepthV2")
+        self.get_logger().info(
+            f"  - Pretrained weights: lpiccinelli/unidepth-v2-vits14"
+        )
+        self.get_logger().info("-" * 60)
+        self.get_logger().info("TOPOLOGICAL MAP CONFIGURATION:")
+        self.get_logger().info(f"  - Topomap directory: {self.args.dir}")
+        self.get_logger().info(f"  - Number of nodes: {len(self.topomap)}")
+        self.get_logger().info(f"  - Goal node: {self.goal_node}")
+        self.get_logger().info(f"  - Search radius: {self.args.radius}")
+        self.get_logger().info(f"  - Close threshold: {self.args.close_threshold}")
+        self.get_logger().info("-" * 60)
+        self.get_logger().info("OBSTACLE AVOIDANCE CONFIGURATION:")
+        self.get_logger().info(f"  - Top view size: {self.top_view_size}")
+        self.get_logger().info(
+            f"  - Top view resolution: {self.top_view_resolution:.2f} pixels/m"
+        )
+        self.get_logger().info(
+            f"  - Top view sampling step: {self.top_view_sampling_step} pixels"
+        )
+        self.get_logger().info("-" * 60)
+        self.get_logger().info("ROS TOPICS:")
+        self.get_logger().info(f"  - Subscribing to: {image_topic}")
+        self.get_logger().info(f"  - Publishing waypoints to: {WAYPOINT_TOPIC}")
+        self.get_logger().info(
+            f"  - Publishing sampled actions to: {SAMPLED_ACTIONS_TOPIC}"
+        )
+        self.get_logger().info(
+            f"  - Publishing navigation visualization to: /navigation_viz"
+        )
+        self.get_logger().info(f"  - Publishing subgoal image to: /navigation_subgoal")
+        self.get_logger().info(f"  - Publishing goal image to: /navigation_goal")
+        self.get_logger().info(
+            f"  - Publishing goal reached status to: /topoplan/reached_goal"
+        )
+        self.get_logger().info("-" * 60)
+        self.get_logger().info("EXECUTION PARAMETERS:")
+        self.get_logger().info(f"  - Waypoint index: {self.args.waypoint}")
+        self.get_logger().info(f"  - Number of samples: {self.args.num_samples}")
+        self.get_logger().info("-" * 60)
+        self.get_logger().info("VISUALIZATION PARAMETERS:")
+        self.get_logger().info(f"  - Pixels per meter: 3.0")
+        self.get_logger().info(f"  - Lateral scale: 1.0")
+        self.get_logger().info(f"  - Horizontal scale: 4.0")
+        self.get_logger().info(f"  - Robot symbol length: 10 pixels")
+        self.get_logger().info("=" * 60)
 
     # Helper: topomap
     # ------------------------------------------------------------------
@@ -164,11 +247,12 @@ class NavigationNode(Node):
     def _image_cb(self, msg: Image):
         now = self.get_clock().now()
         if (now - self.last_ctx_time).nanoseconds < self.ctx_dt * 1e9:
-            # print context queue length
-            self.get_logger().info(f"Context queue length: {len(self.context_queue)}")
             return  # 아직 0.25 s 안 지났으면 무시
         self.context_queue.append(msg_to_pil(msg))
         self.last_ctx_time = now
+        self.get_logger().info(
+            f"Image added to context queue ({len(self.context_queue)})"
+        )
 
     def _timer_cb(self):
         if len(self.context_queue) <= self.context_size:

@@ -45,7 +45,7 @@ def _load_model(model_name: str, device: torch.device):
     if not os.path.exists(ckpt_path):
         raise FileNotFoundError(f"Model weights not found at {ckpt_path}")
 
-    print(f"[INFO] Loading model from {ckpt_path}")
+    print(f"Loading model from {ckpt_path}")
     model = load_model(ckpt_path, model_params, device)
     return model.to(device).eval(), model_params
 
@@ -95,7 +95,55 @@ class ExplorationNode(Node):
         self.viz_pub = self.create_publisher(Image, "trajectory_viz", 1)
 
         self.create_timer(1.0 / RATE, self._timer_cb)
-        self.get_logger().info("Exploration node initialised. Waiting for images…")
+
+        # 시작하기 전에 중요한 파라미터들 출력
+        self.get_logger().info("=" * 60)
+        self.get_logger().info("EXPLORATION NODE PARAMETERS")
+        self.get_logger().info("=" * 60)
+        self.get_logger().info(f"Robot type: {args.robot}")
+        self.get_logger().info(f"Image topic: {image_topic}")
+        self.get_logger().info("-" * 60)
+        self.get_logger().info("ROBOT CONFIGURATION:")
+        self.get_logger().info(f"  - Max linear velocity: {MAX_V} m/s")
+        self.get_logger().info(f"  - Max angular velocity: {MAX_W} rad/s")
+        self.get_logger().info(f"  - Frame rate: {RATE} Hz")
+        self.get_logger().info("-" * 60)
+        self.get_logger().info("MODEL CONFIGURATION:")
+        self.get_logger().info(f"  - Model name: {args.model}")
+        self.get_logger().info(f"  - Device: {self.device}")
+        self.get_logger().info(f"  - Context size: {self.context_size}")
+        self.get_logger().info(f"  - Context update interval: {self.ctx_dt} seconds")
+        self.get_logger().info(
+            f"  - Trajectory length: {self.model_params['len_traj_pred']}"
+        )
+        self.get_logger().info(
+            f"  - Diffusion iterations: {self.model_params['num_diffusion_iters']}"
+        )
+        self.get_logger().info(f"  - Image size: {self.model_params['image_size']}")
+        self.get_logger().info(
+            f"  - Normalize: {self.model_params.get('normalize', False)}"
+        )
+        self.get_logger().info("-" * 60)
+        self.get_logger().info("ROS TOPICS:")
+        self.get_logger().info(f"  - Subscribing to: {image_topic}")
+        self.get_logger().info(f"  - Publishing waypoints to: {WAYPOINT_TOPIC}")
+        self.get_logger().info(
+            f"  - Publishing sampled actions to: {SAMPLED_ACTIONS_TOPIC}"
+        )
+        self.get_logger().info(f"  - Publishing visualization to: /trajectory_viz")
+        self.get_logger().info("-" * 60)
+        self.get_logger().info("EXECUTION PARAMETERS:")
+        self.get_logger().info(f"  - Waypoint index: {args.waypoint}")
+        self.get_logger().info(f"  - Number of samples: {args.num_samples}")
+        self.get_logger().info("-" * 60)
+        self.get_logger().info("VISUALIZATION PARAMETERS:")
+        self.get_logger().info(f"  - Pixels per meter: 3.0")
+        self.get_logger().info(f"  - Lateral scale: 1.0")
+        self.get_logger().info(f"  - Robot symbol length: 10 pixels")
+        self.get_logger().info("=" * 60)
+        self.get_logger().info(
+            f"Exploration node initialized for {args.robot}. Waiting for {image_topic}"
+        )
 
     # ------------------------------------------------------------------
     # Callbacks
@@ -104,11 +152,10 @@ class ExplorationNode(Node):
     def _image_cb(self, msg: Image):
         now = self.get_clock().now()
         if (now - self.last_ctx_time).nanoseconds < self.ctx_dt * 1e9:
-            # print context queue length
-            self.get_logger().info(f"Context queue length: {len(self.context_queue)}")
-            return  # 아직 0.25 s 안 지났으면 무시
+            return  # 아직 0.25 s 안 지났으면 무시
         self.context_queue.append(msg_to_pil(msg))
         self.last_ctx_time = now
+        self.get_logger().info(f"Image added to context queue ({len(self.context_queue)})")
 
     def _timer_cb(self):
         if len(self.context_queue) <= self.context_size:
