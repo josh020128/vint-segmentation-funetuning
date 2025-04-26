@@ -16,6 +16,7 @@ import torchvision.transforms.functional as TF
 import numpy as np
 from PIL import Image as PILImage
 from typing import List, Tuple, Dict, Optional
+import cv2
 
 # models
 from vint_train.models.gnm.gnm import GNM
