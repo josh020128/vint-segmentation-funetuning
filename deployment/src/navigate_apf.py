@@ -186,14 +186,22 @@ class NavigationNode(Node):
         self.get_logger().info(f"  - Context size: {self.context_size}")
         self.get_logger().info(f"  - Context update interval: {self.ctx_dt} seconds")
         if self.model_params["model_type"] == "nomad":
-            self.get_logger().info(f"  - Trajectory length: {self.model_params['len_traj_pred']}")
-            self.get_logger().info(f"  - Diffusion iterations: {self.model_params['num_diffusion_iters']}")
+            self.get_logger().info(
+                f"  - Trajectory length: {self.model_params['len_traj_pred']}"
+            )
+            self.get_logger().info(
+                f"  - Diffusion iterations: {self.model_params['num_diffusion_iters']}"
+            )
         self.get_logger().info(f"  - Image size: {self.model_params['image_size']}")
-        self.get_logger().info(f"  - Normalize: {self.model_params.get('normalize', False)}")
+        self.get_logger().info(
+            f"  - Normalize: {self.model_params.get('normalize', False)}"
+        )
         self.get_logger().info("-" * 60)
         self.get_logger().info("DEPTH MODEL CONFIGURATION:")
         self.get_logger().info(f"  - UniDepth model: UniDepthV2")
-        self.get_logger().info(f"  - Pretrained weights: lpiccinelli/unidepth-v2-vits14")
+        self.get_logger().info(
+            f"  - Pretrained weights: lpiccinelli/unidepth-v2-vits14"
+        )
         self.get_logger().info("-" * 60)
         self.get_logger().info("TOPOLOGICAL MAP CONFIGURATION:")
         self.get_logger().info(f"  - Topomap directory: {self.args.dir}")
@@ -204,17 +212,27 @@ class NavigationNode(Node):
         self.get_logger().info("-" * 60)
         self.get_logger().info("OBSTACLE AVOIDANCE CONFIGURATION:")
         self.get_logger().info(f"  - Top view size: {self.top_view_size}")
-        self.get_logger().info(f"  - Top view resolution: {self.top_view_resolution:.2f} pixels/m")
-        self.get_logger().info(f"  - Top view sampling step: {self.top_view_sampling_step} pixels")
+        self.get_logger().info(
+            f"  - Top view resolution: {self.top_view_resolution:.2f} pixels/m"
+        )
+        self.get_logger().info(
+            f"  - Top view sampling step: {self.top_view_sampling_step} pixels"
+        )
         self.get_logger().info("-" * 60)
         self.get_logger().info("ROS TOPICS:")
         self.get_logger().info(f"  - Subscribing to: {image_topic}")
         self.get_logger().info(f"  - Publishing waypoints to: {WAYPOINT_TOPIC}")
-        self.get_logger().info(f"  - Publishing sampled actions to: {SAMPLED_ACTIONS_TOPIC}")
-        self.get_logger().info(f"  - Publishing navigation visualization to: /navigation_viz")
+        self.get_logger().info(
+            f"  - Publishing sampled actions to: {SAMPLED_ACTIONS_TOPIC}"
+        )
+        self.get_logger().info(
+            f"  - Publishing navigation visualization to: /navigation_viz"
+        )
         self.get_logger().info(f"  - Publishing subgoal image to: /navigation_subgoal")
         self.get_logger().info(f"  - Publishing goal image to: /navigation_goal")
-        self.get_logger().info(f"  - Publishing goal reached status to: /topoplan/reached_goal")
+        self.get_logger().info(
+            f"  - Publishing goal reached status to: /topoplan/reached_goal"
+        )
         self.get_logger().info("-" * 60)
         self.get_logger().info("EXECUTION PARAMETERS:")
         self.get_logger().info(f"  - Waypoint index: {self.args.waypoint}")
@@ -378,7 +396,7 @@ class NavigationNode(Node):
             )
             updated_trajs[i] = (rotation_matrix @ updated_trajs[i].T).T
 
-        return updated_trajs * (MAX_V / RATE)
+        return updated_trajs  # * (MAX_V / RATE)
 
     def _angle_between(self, v1: np.ndarray, v2: np.ndarray) -> float:
         n1, n2 = np.linalg.norm(v1), np.linalg.norm(v2)
