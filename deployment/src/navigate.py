@@ -111,18 +111,24 @@ class NavigationNode(Node):
         # ROS interfaces -----------------------------------------------------
         # 로봇 타입에 따른 이미지 토픽 선택
         if args.robot == "locobot":
-            image_topic = "/camera/image"  # 상수에서 가져옴
+            image_topic = "/robot1/camera/image"  # 상수에서 가져옴
+            waypoint_topic = "/robot1/waypoint"
+            sampled_actions_topic = "/robot1/sampled_actions"
         elif args.robot == "robomaster":
             image_topic = "/camera/image_color"
+            waypoint_topic = "/robot3/waypoint"
+            sampled_actions_topic = "/robot3/sampled_actions"
         elif args.robot == "turtlebot4":
             image_topic = "/robot2/oakd/rgb/preview/image_raw"
+            waypoint_topic = "/robot2/waypoint"
+            sampled_actions_topic = "/robot2/sampled_actions"
         else:
             raise ValueError(f"Unknown robot type: {args.robot}")
 
         self.create_subscription(Image, image_topic, self._image_cb, 1)
-        self.waypoint_pub = self.create_publisher(Float32MultiArray, WAYPOINT_TOPIC, 1)
+        self.waypoint_pub = self.create_publisher(Float32MultiArray, waypoint_topic, 1)
         self.sampled_actions_pub = self.create_publisher(
-            Float32MultiArray, SAMPLED_ACTIONS_TOPIC, 1
+            Float32MultiArray, sampled_actions_topic, 1
         )
         self.goal_pub = self.create_publisher(Bool, "/topoplan/reached_goal", 1)
         self.viz_pub = self.create_publisher(Image, "navigation_viz", 1)

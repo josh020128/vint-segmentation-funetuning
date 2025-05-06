@@ -82,20 +82,34 @@ class ExplorationNode(Node):
 
         # 로봇 타입에 따른 이미지 토픽 선택
         if args.robot == "locobot":
-            image_topic = "/camera/image"  # 상수에서 가져옴
+            image_topic = "/robot1/camera/image"  # 상수에서 가져옴
+            waypoint_topic = "/robot1/waypoint"
+            sampled_actions_topic = "/robot1/sampled_actions"
+            trajectory_viz_topic = "/robot1/trajectory_viz"
+        elif args.robot == "locobot2":
+            image_topic = "/robot3/camera/image"
+            waypoint_topic = "/robot3/waypoint"
+            sampled_actions_topic = "/robot3/sampled_actions"
+            trajectory_viz_topic = "/robot3/trajectory_viz"
         elif args.robot == "robomaster":
             image_topic = "/camera/image_color"
+            waypoint_topic = "/robot3/waypoint"
+            sampled_actions_topic = "/robot3/sampled_actions"
+            trajectory_viz_topic = "/robot3/trajectory_viz"
         elif args.robot == "turtlebot4":
             image_topic = "/robot2/oakd/rgb/preview/image_raw"
+            waypoint_topic = "/robot2/waypoint"
+            sampled_actions_topic = "/robot2/sampled_actions"
+            trajectory_viz_topic = "/robot2/trajectory_viz"
         else:
             raise ValueError(f"Unknown robot type: {args.robot}")
 
         self.create_subscription(Image, image_topic, self._image_cb, 1)
-        self.waypoint_pub = self.create_publisher(Float32MultiArray, WAYPOINT_TOPIC, 1)
+        self.waypoint_pub = self.create_publisher(Float32MultiArray, waypoint_topic, 1)
         self.sampled_actions_pub = self.create_publisher(
-            Float32MultiArray, SAMPLED_ACTIONS_TOPIC, 1
+            Float32MultiArray, sampled_actions_topic, 1
         )
-        self.viz_pub = self.create_publisher(Image, "trajectory_viz", 1)
+        self.viz_pub = self.create_publisher(Image, trajectory_viz_topic, 1)
 
         self.create_timer(1.0 / RATE, self._timer_cb)
         self.get_logger().info(
@@ -108,7 +122,7 @@ class ExplorationNode(Node):
         # self.proximity_threshold = 0.8
         # self.safety_margin = 0.17
 
-        if args.robot == "locobot":
+        if args.robot == "locobot" or args.robot == "locobot2":
             self.safety_margin = 0.05
             self.proximity_threshold = 1.0
         elif args.robot == "robomaster":
@@ -116,7 +130,7 @@ class ExplorationNode(Node):
             self.proximity_threshold = 1.3
         elif args.robot == "turtlebot4":
             self.safety_margin = 0.2
-            self.proximity_threshold = 1.5
+            self.proximity_threshold = 1.4
         else:
             raise ValueError(f"Unsupported robot type: {self.args.robot}")
 
@@ -124,10 +138,10 @@ class ExplorationNode(Node):
         self.top_view_sampling_step = 5
 
         # 로봇 타입에 따른 이미지 크기 설정
-        if args.robot == "locobot":
+        if args.robot == "locobot" or args.robot == "locobot2":
             self.DIM = (320, 240)
         elif args.robot == "robomaster":
-            self.DIM = (640, 480)
+            self.DIM = (640, 360)
         elif args.robot == "turtlebot4":
             self.DIM = (320, 200)
 
@@ -186,7 +200,7 @@ class ExplorationNode(Node):
         self.get_logger().info("=" * 60)
 
     def _init_depth_model(self):
-        if self.args.robot == "locobot":
+        if self.args.robot == "locobot" or self.args.robot == "locobot2":
             self.K = np.load("./UniDepth/assets/fisheye/fisheye_intrinsics.npy")
             self.D = np.load("./UniDepth/assets/fisheye/fisheye_distortion.npy")
             self.map1, self.map2 = cv2.fisheye.initUndistortRectifyMap(
@@ -226,7 +240,7 @@ class ExplorationNode(Node):
         # depth 추론 및 장애물 저장
         cv2_img = self.bridge.imgmsg_to_cv2(msg)
 
-        if self.args.robot == "locobot":
+        if self.args.robot == "locobot" or self.args.robot == "locobot2":
             frame = cv2.resize(cv2_img, self.DIM)
             # undistorted = cv2.remap(
             #     frame, self.map1, self.map2, interpolation=cv2.INTER_LINEAR
@@ -471,7 +485,7 @@ def main():
         "--robot",
         type=str,
         default="locobot",
-        choices=["locobot", "robomaster", "turtlebot4"],
+        choices=["locobot", "locobot2", "robomaster", "turtlebot4"],
         help="Robot type (locobot, robomaster, turtlebot4)",
     )
     args = parser.parse_args()

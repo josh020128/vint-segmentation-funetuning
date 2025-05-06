@@ -104,10 +104,10 @@ class NavigationNode(Node):
             self.proximity_threshold = 1.0
         elif args.robot == "robomaster":
             self.safety_margin = -0.1
-            self.proximity_threshold = 1.3
+            self.proximity_threshold = 1.0
         elif args.robot == "turtlebot4":
             self.safety_margin = 0.2
-            self.proximity_threshold = 1.5
+            self.proximity_threshold = 1.2
         else:
             raise ValueError(f"Unsupported robot type: {self.args.robot}")
 
@@ -118,7 +118,7 @@ class NavigationNode(Node):
         if args.robot == "locobot":
             self.DIM = (320, 240)
         elif args.robot == "robomaster":
-            self.DIM = (640, 480)
+            self.DIM = (640, 360)
         elif args.robot == "turtlebot4":
             self.DIM = (320, 200)
 
@@ -133,18 +133,23 @@ class NavigationNode(Node):
 
         # ROS interfaces -----------------------------------------------------
         if args.robot == "locobot":
-            image_topic = "/camera/image"
+            image_topic = "/robot1/camera/image"  # 상수에서 가져옴
+            waypoint_topic = "/robot1/waypoint"
+            sampled_actions_topic = "/robot1/sampled_actions"
         elif args.robot == "robomaster":
             image_topic = "/camera/image_color"
+            waypoint_topic = "/robot3/waypoint"
+            sampled_actions_topic = "/robot3/sampled_actions"
         elif args.robot == "turtlebot4":
             image_topic = "/robot2/oakd/rgb/preview/image_raw"
+            waypoint_topic = "/robot2/waypoint"
+            sampled_actions_topic = "/robot2/sampled_actions"
         else:
             raise ValueError(f"Unknown robot type: {args.robot}")
-
         self.create_subscription(Image, image_topic, self._image_cb, 1)
-        self.waypoint_pub = self.create_publisher(Float32MultiArray, WAYPOINT_TOPIC, 1)
+        self.waypoint_pub = self.create_publisher(Float32MultiArray, waypoint_topic, 1)
         self.sampled_actions_pub = self.create_publisher(
-            Float32MultiArray, SAMPLED_ACTIONS_TOPIC, 1
+            Float32MultiArray, sampled_actions_topic, 1
         )
         self.goal_pub = self.create_publisher(Bool, "/topoplan/reached_goal", 1)
         self.viz_pub = self.create_publisher(Image, "navigation_viz", 1)
@@ -299,6 +304,7 @@ class NavigationNode(Node):
             rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         elif self.args.robot == "robomaster":
             frame = cv2_img.copy()
+            frame = cv2.resize(cv2_img, self.DIM)
             rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         elif self.args.robot == "turtlebot4":
             frame = cv2_img.copy()
@@ -640,7 +646,7 @@ class NavigationNode(Node):
 
     # Publish helpers
     def _publish_goal_images(self, sg_img: PILImage.Image, goal_img: PILImage.Image):
-        """Publish current sub‑goal and final goal images as ROS sensor_msgs/Image."""
+        """Publish current sub‑goal an d final goal images as ROS sensor_msgs/Image."""
         for img, pub in [(sg_img, self.subgoal_pub), (goal_img, self.goal_pub_img)]:
             cv_img = cv2.cvtColor(np.array(img.convert("RGB")), cv2.COLOR_RGB2BGR)
             msg = self.bridge.cv2_to_imgmsg(cv_img, encoding="bgr8")
@@ -673,6 +679,9 @@ class NavigationNode(Node):
         # 수정사항:
         pixels_per_m = 3.0
         lateral_scale = 1.0
+        horizontal_scale = 1.0
+        # lateral_scale = 16.0
+        # horizontal_scale = 16.0
         robot_symbol_length = 10
 
         cv2.line(
@@ -701,8 +710,12 @@ class NavigationNode(Node):
                 acc_x += dx
                 acc_y += dy
                 # lateral_scale 적용하여 좌우로 더 넓게
-                px = int(cx - acc_y * pixels_per_m * lateral_scale)  # acc_y 사용
-                py = int(cy - acc_x * pixels_per_m * 6.0)
+                if is_apf_applied:
+                    px = int(cx - acc_y * pixels_per_m)  # acc_y 사용
+                    py = int(cy - acc_x * pixels_per_m)
+                else:
+                    px = int(cx - acc_y * pixels_per_m * lateral_scale)  # acc_y 사용
+                    py = int(cy - acc_x * pixels_per_m * horizontal_scale)
                 pts.append((px, py))
 
             if len(pts) >= 2:
