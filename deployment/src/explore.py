@@ -77,22 +77,35 @@ class ExplorationNode(Node):
         self.context_queue: Deque[np.ndarray] = deque(maxlen=self.context_size + 1)
         self.bridge = CvBridge()
 
-        # 로봇 타입에 따른 이미지 토픽 선택
         if args.robot == "locobot":
-            image_topic = "/camera/image"  # 상수에서 가져옴
+            image_topic = "/robot1/camera/image"  # 상수에서 가져옴
+            waypoint_topic = "/robot1/waypoint"
+            sampled_actions_topic = "/robot1/sampled_actions"
+            trajectory_viz_topic = "/robot1/trajectory_viz"
+        elif args.robot == "locobot2":
+            image_topic = "/robot3/camera/image"
+            waypoint_topic = "/robot3/waypoint"
+            sampled_actions_topic = "/robot3/sampled_actions"
+            trajectory_viz_topic = "/robot3/trajectory_viz"
         elif args.robot == "robomaster":
             image_topic = "/camera/image_color"
+            waypoint_topic = "/robot3/waypoint"
+            sampled_actions_topic = "/robot3/sampled_actions"
+            trajectory_viz_topic = "/robot3/trajectory_viz"
         elif args.robot == "turtlebot4":
             image_topic = "/robot2/oakd/rgb/preview/image_raw"
+            waypoint_topic = "/robot2/waypoint"
+            sampled_actions_topic = "/robot2/sampled_actions"
+            trajectory_viz_topic = "/robot2/trajectory_viz"
         else:
             raise ValueError(f"Unknown robot type: {args.robot}")
 
         self.create_subscription(Image, image_topic, self._image_cb, 1)
-        self.waypoint_pub = self.create_publisher(Float32MultiArray, WAYPOINT_TOPIC, 1)
+        self.waypoint_pub = self.create_publisher(Float32MultiArray, waypoint_topic, 1)
         self.sampled_actions_pub = self.create_publisher(
-            Float32MultiArray, SAMPLED_ACTIONS_TOPIC, 1
+            Float32MultiArray, sampled_actions_topic, 1
         )
-        self.viz_pub = self.create_publisher(Image, "trajectory_viz", 1)
+        self.viz_pub = self.create_publisher(Image, trajectory_viz_topic, 1)
 
         self.create_timer(1.0 / RATE, self._timer_cb)
 
@@ -286,7 +299,7 @@ def main():
         "--robot",
         type=str,
         default="locobot",
-        choices=["locobot", "robomaster", "turtlebot4"],
+        choices=["locobot", "locobot2", "robomaster", "turtlebot4"],
         help="Robot type (locobot, robomaster, turtlebot4)",
     )
     args = parser.parse_args()
