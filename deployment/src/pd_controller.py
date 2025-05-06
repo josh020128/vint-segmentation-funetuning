@@ -18,6 +18,7 @@ from typing import Optional, Tuple
 
 import numpy as np
 import yaml
+import argparse
 
 import rclpy
 from rclpy.node import Node
@@ -51,11 +52,29 @@ MAX_TIME: float = 30000.0  # 최대 실행 시간 (1분)
 class PDControllerNode(Node):
     """ROS 2 node implementing a planar PD controller."""
 
-    def __init__(self, controller_type: str) -> None:
+    def __init__(self, args: argparse.Namespace) -> None:
         super().__init__("pd_controller")
-        self.controller_type = controller_type
+        self.controller_type = args.control
 
-        # internal state
+        # 로봇 타입에 따른 이미지 토픽 선택
+        if args.robot == "locobot":
+            waypoint_topic = "/robot1/waypoint"
+            vel_topic = "/robot1/cmd_vel"
+        elif args.robot == "locobot2":
+            waypoint_topic = "/robot3/waypoint"
+            vel_topic = "/robot3/cmd_vel"
+        elif args.robot == "robomaster":
+            waypoint_topic = "/robot3/waypoint"
+            vel_topic = "/cmd_vel"
+        elif args.robot == "turtlebot4":
+            waypoint_topic = "/robot2/waypoint"
+            vel_topic = "/robot2/cmd_vel"
+        else:
+            raise ValueError(f"Unknown robot type: {args.robot}")
+
+        self.get_logger().info(f"로봇 타입: {args.robot}, 사용 토픽: {waypoint_topic}, {vel_topic}")
+
+        # 내부 상태
         self.waypoint: Optional[np.ndarray] = None
         self._last_wp_time: float = 0.0
         self.reached_goal: bool = False
@@ -71,10 +90,10 @@ class PDControllerNode(Node):
         self.start_time: float = time.time()
         self.total_time: float = 0.0
 
-        # pubs / subs
-        self.vel_pub = self.create_publisher(Twist, VEL_TOPIC, 1)
+        # pubs / subs - 선택된 토픽 사용
+        self.vel_pub = self.create_publisher(Twist, vel_topic, 1)
         self.create_subscription(
-            Float32MultiArray, WAYPOINT_TOPIC, self._waypoint_cb, 1
+            Float32MultiArray, waypoint_topic, self._waypoint_cb, 1
         )
         self.create_subscription(Bool, REACHED_GOAL_TOPIC, self._goal_cb, 1)
 
@@ -199,16 +218,21 @@ class PDControllerNode(Node):
 def main(args=None):  # pragma: no cover
     rclpy.init(args=args)
 
-    # 명령줄 인자 파싱 추가
-    import argparse
-
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--control", type=str, default="nomad", help="control type (nomad, apf)"
     )
+    parser.add_argument(
+        "--robot",
+        type=str,
+        default="locobot",
+        choices=["locobot", "locobot2", "robomaster", "turtlebot4"],
+        help="Robot type (locobot, robomaster, turtlebot4)",
+    )
     args, unknown = parser.parse_known_args()
 
-    node = PDControllerNode(controller_type=args.control)
+    # 로봇 타입을 노드에 직접 전달
+    node = PDControllerNode(args)
     rclpy.spin(node)
 
 
