@@ -8,6 +8,7 @@ import io
 import lmdb
 
 import torch
+from PIL import Image
 from torch.utils.data import Dataset
 import torchvision.transforms.functional as TF
 
@@ -224,17 +225,68 @@ class ViNT_Dataset(Dataset):
             with open(index_to_data_path, "wb") as f:
                 pickle.dump((self.index_to_data, self.goals_index), f)
 
-    def _load_image(self, trajectory_name, time):
+    def _load_image(self, trajectory_name: str, time: int) -> torch.Tensor:
+        """
+        Loads an image from the fast LMDB cache and correctly resizes it.
+        """
         image_path = get_data_path(self.data_folder, trajectory_name, time)
-
         try:
+            # 1. Load the raw image bytes from the LMDB cache
             with self._image_cache.begin() as txn:
                 image_buffer = txn.get(image_path.encode())
-                image_bytes = bytes(image_buffer)
-            image_bytes = io.BytesIO(image_bytes)
-            return img_path_to_data(image_bytes, self.image_size)
-        except TypeError:
-            print(f"Failed to load image {image_path}")
+            
+            # 2. Convert the bytes to a PIL Image object
+            image = Image.open(io.BytesIO(image_buffer)).convert("RGB")
+
+            # 3. Correctly resize the image
+            resized_image = image.resize((self.image_size[1], self.image_size[0]))
+            
+            # 4. Convert to a tensor
+            image_tensor = TF.to_tensor(resized_image)
+            return image_tensor
+
+        except Exception as e:
+            print(f"Error loading image {image_path} from cache: {e}")
+            # If cache fails, fall back to loading from the file directly
+            return self._load_single_image(image_path)
+
+    # Added helper function
+    def _load_image_and_resize(self, image_path: str) -> torch.Tensor:
+        """Loads and correctly resizes a single image from a path."""
+        try:
+            image = Image.open(image_path).convert("RGB")
+            
+            # --- THIS IS THE FIX ---
+            # PIL's resize function expects (width, height), so we pass the dimensions
+            # in that order from self.image_size, which is (height, width).
+            resized_image = image.resize((self.image_size[1], self.image_size[0]))
+            
+            # Convert to tensor, normalizing values to [0, 1]
+            image_tensor = TF.to_tensor(resized_image)
+            return image_tensor
+        except Exception as e:
+            print(f"Error loading image {image_path}: {e}")
+            # Return a black image at the correct final size as a fallback
+            return torch.zeros((3, self.image_size[0], self.image_size[1]))
+        
+    # In segmentation_dataset.py, add this method to ViNTSegmentationDataset class:
+
+    def _load_single_image(self, image_path: str) -> torch.Tensor:
+        """Loads and correctly resizes a single image from a given path."""
+        try:
+            image = Image.open(image_path).convert("RGB")
+            # PIL's resize expects (width, height), so we pass them in that order.
+            # self.image_size is (height, width).
+            resized_image = image.resize((self.image_size[1], self.image_size[0]))
+            
+            # Convert to a tensor, normalizing values to [0, 1]
+            image_tensor = TF.to_tensor(resized_image)
+            return image_tensor
+            
+        except Exception as e:
+            print(f"Error loading image {image_path}: {e}")
+            # Return a black image at the correct final size as a fallback
+            return torch.zeros((3, self.image_size[0], self.image_size[1]))
 
     def _compute_actions(self, traj_data, curr_time, goal_time):
         start_index = curr_time

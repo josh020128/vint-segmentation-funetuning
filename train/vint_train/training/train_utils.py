@@ -6,6 +6,7 @@ from typing import List, Optional, Dict
 from prettytable import PrettyTable
 import tqdm
 import itertools
+import shutil
 
 from vint_train.visualizing.action_utils import visualize_traj_pred, plot_trajs_and_points
 from vint_train.visualizing.distance_utils import visualize_dist_pred
@@ -1175,3 +1176,106 @@ def visualize_diffusion_action_distribution(
         wandb.log({f"{eval_type}_action_samples": wandb_list}, commit=False)
 
 
+def save_checkpoint(
+    model: nn.Module,
+    optimizer: torch.optim.Optimizer,
+    scheduler: torch.optim.lr_scheduler._LRScheduler,
+    epoch: int,
+    project_folder: str,
+    is_best: bool = False,
+):
+    """
+    Saves a training checkpoint. Includes model, optimizer, scheduler, and epoch.
+    Also saves a separate 'best_model.pth' if is_best is True.
+    """
+    if not os.path.isdir(project_folder):
+        os.makedirs(project_folder)
+        
+    # Create the checkpoint dictionary
+    model_state = model.module.state_dict() if isinstance(model, nn.DataParallel) else model.state_dict()
+    checkpoint = {
+        "epoch": epoch + 1, # Save the next epoch to start from
+        "model_state_dict": model_state,
+        "optimizer_state_dict": optimizer.state_dict(),
+    }
+    if scheduler is not None:
+        checkpoint["scheduler_state_dict"] = scheduler.state_dict()
+        
+    # Save the latest checkpoint with the epoch number
+    latest_checkpoint_path = os.path.join(project_folder, f"checkpoint_epoch_{epoch}.pth")
+    torch.save(checkpoint, latest_checkpoint_path)
+    print(f"Saved checkpoint to {latest_checkpoint_path}")
+    
+    # If this is the best model so far, save it to a separate file
+    if is_best:
+        best_model_path = os.path.join(project_folder, "best_model.pth")
+        shutil.copyfile(latest_checkpoint_path, best_model_path)
+        print(f"Saved new best model to {best_model_path}")
+
+# In vint_train/training/train_utils.py
+
+def load_model(model: nn.Module, model_type: str, checkpoint: dict) -> None:
+    """
+    Loads model weights from a checkpoint, intelligently handling different formats,
+    architectural mismatches, and DataParallel wrappers.
+    """
+    
+    # --- FIXED: More robustly extract the state_dict ---
+    state_dict = None
+    # First, check if the loaded checkpoint is a dictionary
+    if isinstance(checkpoint, dict):
+        if "model" in checkpoint:
+            state_dict = checkpoint["model"]
+        elif "model_state_dict" in checkpoint:
+            state_dict = checkpoint["model_state_dict"]
+        else:
+            # Assume the dictionary itself is the state_dict
+            state_dict = checkpoint
+    else:
+        # If the checkpoint is not a dict, it's likely the model object itself
+        state_dict = checkpoint
+
+    # If the extracted state_dict is still a model object, get its state_dict
+    if hasattr(state_dict, 'state_dict'):
+        state_dict = state_dict.state_dict()
+
+    # Get the state dict of the model we are loading INTO
+    model_state_dict = model.state_dict()
+    
+    # --- Handle DataParallel prefix mismatch ---
+    # If the checkpoint was saved with DataParallel but the current model is not
+    if all(k.startswith('module.') for k in state_dict.keys()) and not all(k.startswith('module.') for k in model_state_dict.keys()):
+        print("Removing 'module.' prefix from checkpoint keys...")
+        state_dict = {k[7:]: v for k, v in state_dict.items()}
+        
+    # If the current model is DataParallel but the checkpoint was not
+    if not all(k.startswith('module.') for k in state_dict.keys()) and all(k.startswith('module.') for k in model_state_dict.keys()):
+        print("Adding 'module.' prefix to checkpoint keys...")
+        state_dict = {'module.' + k: v for k, v in state_dict.items()}
+
+    # --- Filter for matching keys and shapes ---
+    # This is crucial for transfer learning from ViNT to SegmentationViNT
+    filtered_state_dict = {
+        k: v for k, v in state_dict.items() 
+        if k in model_state_dict and v.shape == model_state_dict[k].shape
+    }
+
+    # Load the filtered weights, ignoring mismatches
+    model.load_state_dict(filtered_state_dict, strict=False)
+    
+    # --- Print a helpful report ---
+    loaded_keys = filtered_state_dict.keys()
+    original_keys = state_dict.keys()
+    model_keys = model_state_dict.keys()
+    
+    ignored_keys = [k for k in original_keys if k not in loaded_keys]
+    missing_keys = [k for k in model_keys if k not in loaded_keys]
+    
+    print(f"\n Successfully loaded {len(loaded_keys)} matching layers.")
+    if ignored_keys:
+        print(f"  Ignored {len(ignored_keys)} layers from checkpoint (due to name or shape mismatch).")
+        # print("   Example ignored keys:", ignored_keys[:5])
+    if missing_keys:
+        print(f" Initialized {len(missing_keys)} new layers randomly.")
+        # print("   Example new keys:", missing_keys[:5])
+    print("")

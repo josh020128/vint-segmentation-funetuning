@@ -59,10 +59,10 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
 
     parser.add_argument(
-        "--data-dir", "-i", help="Directory containing the data", required=True
+        "--data-dir", "-i", default="../datasets/scand_processed", help="Directory containing the data"
     )
     parser.add_argument(
-        "--dataset-name", "-d", help="Name of the dataset", required=True
+        "--dataset-name", "-d", default="scand", help="Name of the dataset"
     )
     parser.add_argument(
         "--split", "-s", type=float, default=0.8, help="Train/test split (default: 0.8)"
