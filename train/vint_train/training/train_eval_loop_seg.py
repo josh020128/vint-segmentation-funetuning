@@ -37,6 +37,12 @@ def save_checkpoint(model, optimizer, scheduler, epoch, project_folder, is_best=
         best_path = os.path.join(project_folder, 'best.pth')
         shutil.copyfile(latest_path, best_path)
         print(f"Epoch {epoch}: New best model saved!")
+    
+    # Also save periodic checkpoints for safety
+    if (epoch + 1) % 10 == 0:
+        periodic_path = os.path.join(project_folder, f'checkpoint_epoch_{epoch+1}.pth')
+        shutil.copyfile(latest_path, periodic_path)
+        print(f"Periodic checkpoint saved for epoch {epoch+1}")
 
 def to_numpy(tensor: torch.Tensor) -> np.ndarray:
     """Helper to convert a tensor to a numpy array."""
@@ -82,6 +88,7 @@ def train_eval_loop_segmentation(
     gradient_accumulation_steps: int = 1,
     stage1_epochs: int = 20,
     stage2_epochs: int = 40,
+    start_stage: int = 1, # Added for resuming
 ):
     """3-stage training for SegmentationViNT."""
     total_epochs_trained = 0
@@ -91,41 +98,46 @@ def train_eval_loop_segmentation(
     scaler = GradScaler() if device.type == 'cuda' else None
     
     # --- STAGE 1: Train new modules only ---
-    print(f"\n{'='*60}\nSTAGE 1: Training Segmentation & Fusion (ViNT Frozen)\n{'='*60}")
-    stage1_optimizer = torch.optim.AdamW(filter(lambda p: p.requires_grad, model.parameters()), lr=initial_lr)
-    stage1_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(stage1_optimizer, T_max=stage1_epochs)
     
-    for epoch in range(stage1_epochs):
-        print(f"\n--- Stage 1, Epoch {epoch+1}/{stage1_epochs} ---")
-        train_epoch(model, dataloader, stage1_optimizer, loss_fn, device, scaler, gradient_accumulation_steps, print_log_freq, use_wandb, total_epochs_trained)
-        stage1_scheduler.step()
-        if (epoch + 1) % 5 == 0:
-            evaluate_and_log(model, test_dataloaders, device, total_epochs_trained, use_wandb, stage=1)
-            visualize_batch(model, next(iter(dataloader)), device, total_epochs_trained, 1, project_folder, use_wandb)
-        total_epochs_trained += 1
+    if start_stage <= 1 :
+        print(f"\n{'='*60}\nSTAGE 1: Training Segmentation & Fusion (ViNT Frozen)\n{'='*60}")
+        stage1_optimizer = torch.optim.AdamW(filter(lambda p: p.requires_grad, model.parameters()), lr=initial_lr)
+        stage1_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(stage1_optimizer, T_max=stage1_epochs)
+        for epoch in range(stage1_epochs):
+            print(f"\n--- Stage 1, Epoch {epoch+1}/{stage1_epochs} ---")
+            train_epoch(model, dataloader, stage1_optimizer, loss_fn, device, scaler, gradient_accumulation_steps, print_log_freq, use_wandb, total_epochs_trained)
+            stage1_scheduler.step()
+            if (epoch + 1) % 5 == 0:
+                evaluate_and_log(model, test_dataloaders, device, total_epochs_trained, use_wandb, stage=1)
+                visualize_batch(model, next(iter(dataloader)), device, total_epochs_trained, 1, project_folder, use_wandb)
+            total_epochs_trained += 1
+        save_checkpoint(model, stage1_optimizer, stage1_scheduler, total_epochs_trained, project_folder)
 
     # --- STAGE 2: Unfreeze and train with different LRs ---
-    print(f"\n{'='*60}\nSTAGE 2: Unfreezing ViNT (Discriminative LRs)\n{'='*60}")
-    model_module.unfreeze_vint_encoder()
-    param_groups = [
-        {'params': list(model_module.seg_model.parameters()) + list(model_module.fusion_module.parameters()), 'lr': initial_lr},
-        {'params': model_module.vint_model.parameters(), 'lr': initial_lr * 0.001}
-    ]
-    stage2_optimizer = torch.optim.AdamW(param_groups)
-    stage2_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(stage2_optimizer, T_max=stage2_epochs)
-    
-    for epoch in range(stage2_epochs):
-        print(f"\n--- Stage 2, Epoch {epoch+1}/{stage2_epochs} ---")
-        train_epoch(model, dataloader, stage2_optimizer, loss_fn, device, scaler, gradient_accumulation_steps, print_log_freq, use_wandb, total_epochs_trained)
-        stage2_scheduler.step()
-        if (epoch + 1) % 5 == 0:
-            evaluate_and_log(model, test_dataloaders, device, total_epochs_trained, use_wandb, stage=2)
-            visualize_batch(model, next(iter(dataloader)), device, total_epochs_trained, 2, project_folder, use_wandb)
-        total_epochs_trained += 1
+    if start_stage <= 2:
+        print(f"\n{'='*60}\nSTAGE 2: Unfreezing ViNT (Discriminative LRs)\n{'='*60}")
+        model_module.unfreeze_vint_encoder()
+        param_groups = [
+            {'params': list(model_module.seg_model.parameters()) + list(model_module.fusion_module.parameters()), 'lr': initial_lr},
+            {'params': model_module.vint_model.parameters(), 'lr': initial_lr * 0.001}
+        ]
+        stage2_optimizer = torch.optim.AdamW(param_groups)
+        stage2_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(stage2_optimizer, T_max=stage2_epochs)
+        
+        for epoch in range(stage2_epochs):
+            print(f"\n--- Stage 2, Epoch {epoch+1}/{stage2_epochs} ---")
+            train_epoch(model, dataloader, stage2_optimizer, loss_fn, device, scaler, gradient_accumulation_steps, print_log_freq, use_wandb, total_epochs_trained)
+            stage2_scheduler.step()
+            if (epoch + 1) % 5 == 0:
+                evaluate_and_log(model, test_dataloaders, device, total_epochs_trained, use_wandb, stage=2)
+                visualize_batch(model, next(iter(dataloader)), device, total_epochs_trained, 2, project_folder, use_wandb)
+            total_epochs_trained += 1
+        save_checkpoint(model, stage2_optimizer, stage2_scheduler, total_epochs_trained, project_folder)
+
 
     # --- STAGE 3: Fine-tune everything ---
     remaining_epochs = epochs - total_epochs_trained
-    if remaining_epochs > 0:
+    if start_stage <= 3 and remaining_epochs > 0:
         print(f"\n{'='*60}\nSTAGE 3: Full Fine-tuning\n{'='*60}")
         stage3_optimizer = torch.optim.AdamW(model.parameters(), lr=initial_lr * 0.001)
         stage3_scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(stage3_optimizer, mode='min', factor=0.5, patience=5, verbose=True)
