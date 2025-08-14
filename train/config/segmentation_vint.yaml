@@ -16,6 +16,8 @@ mha_num_attention_heads: 8
 mha_num_attention_layers: 4
 mha_ff_dim_factor: 4
 
+vint_feature_channels: 512
+
 # ==================================================================
 # Segmentation Specific
 # ==================================================================
@@ -23,7 +25,7 @@ num_seg_classes: 5  # SCAND: floor, wall, door, furniture, unknown
 seg_model_name: "scand"  # Must match dataset class mapping
 seg_model_type: "unet"
 seg_encoder: "resnet34"
-fusion_type: "cross_attention"  # or "simple" for baseline
+fusion_type: "gated"  # or "simple" for baseline
 use_semantic_goals: true
 
 # CRITICAL for heuristics:
