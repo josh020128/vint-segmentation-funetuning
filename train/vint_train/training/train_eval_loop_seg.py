@@ -1,5 +1,7 @@
+# FILE: vint_train/training/train_eval_loop_seg.py
+
 """
-Training and evaluation loop for SegmentationViNT with FuSe schedule
+Training and evaluation loop for the late-fusion SegmentationViNT.
 """
 import torch
 import torch.nn as nn
@@ -37,12 +39,6 @@ def save_checkpoint(model, optimizer, scheduler, epoch, project_folder, is_best=
         best_path = os.path.join(project_folder, 'best.pth')
         shutil.copyfile(latest_path, best_path)
         print(f"Epoch {epoch}: New best model saved!")
-    
-    # Also save periodic checkpoints for safety
-    if (epoch + 1) % 10 == 0:
-        periodic_path = os.path.join(project_folder, f'checkpoint_epoch_{epoch+1}.pth')
-        shutil.copyfile(latest_path, periodic_path)
-        print(f"Periodic checkpoint saved for epoch {epoch+1}")
 
 def to_numpy(tensor: torch.Tensor) -> np.ndarray:
     """Helper to convert a tensor to a numpy array."""
@@ -72,7 +68,6 @@ def visualize_batch(model, batch, device, epoch, stage, project_folder, use_wand
         )
     model.train() # Set back to train mode
 
-
 # --- Main Training Loop ---
 
 def train_eval_loop_segmentation(
@@ -82,74 +77,83 @@ def train_eval_loop_segmentation(
     epochs: int,
     device: torch.device,
     project_folder: str,
-    initial_lr: float = 1e-4,
-    use_wandb: bool = True,
-    print_log_freq: int = 100,
-    gradient_accumulation_steps: int = 1,
-    stage1_epochs: int = 20,
-    stage2_epochs: int = 40,
-    start_stage: int = 1, # Added for resuming
+    config: Dict,
+    start_stage: int = 1,
 ):
-    """3-stage training for SegmentationViNT."""
+    """3-stage FuSe training for the late-fusion SegmentationViNT."""
     total_epochs_trained = 0
     model_module = get_model_module(model)
+    
+    lr_config = config["lr_schedule"]
+    stage1_epochs = config.get("stage1_epochs", 30)
+    stage2_epochs = config.get("stage2_epochs", 40)
     
     loss_fn = SegmentationNavigationLoss(use_uncertainty_weighting=True)
     scaler = GradScaler() if device.type == 'cuda' else None
     
-    # --- STAGE 1: Train new modules only ---
-    
-    if start_stage <= 1 :
-        print(f"\n{'='*60}\nSTAGE 1: Training Segmentation & Fusion (ViNT Frozen)\n{'='*60}")
-        stage1_optimizer = torch.optim.AdamW(filter(lambda p: p.requires_grad, model.parameters()), lr=initial_lr)
+    best_val_score = float('inf')
+
+    # --- STAGE 1: Train new layers only ---
+    if start_stage <= 1:
+        print(f"\n{'='*60}\nSTAGE 1: Training New Modules (ViNT Frozen)\n{'='*60}")
+        trainable_params = list(model_module.seg_model.parameters()) + \
+                           list(model_module.seg_feature_extractor.parameters()) + \
+                           list(model_module.action_predictor.parameters()) + \
+                           list(model_module.dist_predictor.parameters())
+        stage1_optimizer = torch.optim.AdamW(trainable_params, lr=lr_config["stage1"])
         stage1_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(stage1_optimizer, T_max=stage1_epochs)
+        
         for epoch in range(stage1_epochs):
             print(f"\n--- Stage 1, Epoch {epoch+1}/{stage1_epochs} ---")
-            train_epoch(model, dataloader, stage1_optimizer, loss_fn, device, scaler, gradient_accumulation_steps, print_log_freq, use_wandb, total_epochs_trained)
+            train_epoch(model, dataloader, stage1_optimizer, loss_fn, device, scaler, config, total_epochs_trained)
             stage1_scheduler.step()
             if (epoch + 1) % 5 == 0:
-                evaluate_and_log(model, test_dataloaders, device, total_epochs_trained, use_wandb, stage=1)
-                visualize_batch(model, next(iter(dataloader)), device, total_epochs_trained, 1, project_folder, use_wandb)
+                evaluate_and_log(model, test_dataloaders, device, total_epochs_trained, config, stage=1)
+                visualize_batch(model, next(iter(dataloader)), device, total_epochs_trained, 1, project_folder)
             total_epochs_trained += 1
         save_checkpoint(model, stage1_optimizer, stage1_scheduler, total_epochs_trained, project_folder)
 
     # --- STAGE 2: Unfreeze and train with different LRs ---
     if start_stage <= 2:
         print(f"\n{'='*60}\nSTAGE 2: Unfreezing ViNT (Discriminative LRs)\n{'='*60}")
-        model_module.unfreeze_vint_encoder()
+        model_module.unfreeze_vint()
+        
         param_groups = [
-            {'params': list(model_module.seg_model.parameters()) + list(model_module.fusion_module.parameters()), 'lr': initial_lr},
-            {'params': model_module.vint_model.parameters(), 'lr': initial_lr * 0.001}
+            {'params': list(model_module.seg_model.parameters()) + 
+                       list(model_module.seg_feature_extractor.parameters()) + 
+                       list(model_module.action_predictor.parameters()) + 
+                       list(model_module.dist_predictor.parameters()), 
+             'lr': lr_config["stage2_new_modules"]},
+            {'params': model_module.vint_model.parameters(), 'lr': lr_config["stage2_vint_backbone"]}
         ]
         stage2_optimizer = torch.optim.AdamW(param_groups)
         stage2_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(stage2_optimizer, T_max=stage2_epochs)
         
         for epoch in range(stage2_epochs):
             print(f"\n--- Stage 2, Epoch {epoch+1}/{stage2_epochs} ---")
-            train_epoch(model, dataloader, stage2_optimizer, loss_fn, device, scaler, gradient_accumulation_steps, print_log_freq, use_wandb, total_epochs_trained)
+            train_epoch(model, dataloader, stage2_optimizer, loss_fn, device, scaler, config, total_epochs_trained)
             stage2_scheduler.step()
             if (epoch + 1) % 5 == 0:
-                evaluate_and_log(model, test_dataloaders, device, total_epochs_trained, use_wandb, stage=2)
-                visualize_batch(model, next(iter(dataloader)), device, total_epochs_trained, 2, project_folder, use_wandb)
+                evaluate_and_log(model, test_dataloaders, device, total_epochs_trained, config, stage=2)
+                visualize_batch(model, next(iter(dataloader)), device, total_epochs_trained, 2, project_folder)
             total_epochs_trained += 1
         save_checkpoint(model, stage2_optimizer, stage2_scheduler, total_epochs_trained, project_folder)
-
 
     # --- STAGE 3: Fine-tune everything ---
     remaining_epochs = epochs - total_epochs_trained
     if start_stage <= 3 and remaining_epochs > 0:
         print(f"\n{'='*60}\nSTAGE 3: Full Fine-tuning\n{'='*60}")
-        stage3_optimizer = torch.optim.AdamW(model.parameters(), lr=initial_lr * 0.001)
+        stage3_optimizer = torch.optim.AdamW(model.parameters(), lr=lr_config["stage3"])
         stage3_scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(stage3_optimizer, mode='min', factor=0.5, patience=5, verbose=True)
         best_val_score = float('inf')
         
         for epoch in range(remaining_epochs):
             print(f"\n--- Stage 3, Epoch {epoch+1}/{remaining_epochs} ---")
-            train_epoch(model, dataloader, stage3_optimizer, loss_fn, device, scaler, gradient_accumulation_steps, print_log_freq, use_wandb, total_epochs_trained)
+            train_epoch(model, dataloader, stage3_optimizer, loss_fn, device, scaler, config, total_epochs_trained)
             
-            val_metrics = evaluate_and_log(model, test_dataloaders, device, total_epochs_trained, use_wandb, stage=3)
+            val_metrics = evaluate_and_log(model, test_dataloaders, device, total_epochs_trained, config, stage=3)
             val_loader = next(iter(test_dataloaders.values()))
-            visualize_batch(model, next(iter(val_loader)), device, total_epochs_trained, 3, project_folder, use_wandb)
+            visualize_batch(model, next(iter(val_loader)), device, total_epochs_trained, 3, project_folder)
             
             val_score = val_metrics.get('val_score', float('inf'))
             stage3_scheduler.step(val_score)
@@ -162,146 +166,118 @@ def train_eval_loop_segmentation(
 
     print(f"\n{'='*60}\n Training Complete! Best validation score: {best_val_score:.4f}\n{'='*60}")
 
-def train_epoch(model, dataloader, optimizer, loss_fn, device, scaler, 
-                grad_accum, log_freq, use_wandb, epoch):
-    """Train for one epoch"""
+# <<< FIXED: Replaced placeholder with the full, robust training function >>>
+def train_epoch(model, dataloader, optimizer, loss_fn, device, scaler, config, epoch):
+    """Helper function to train for one epoch with enhanced stability checks."""
     model.train()
-    epoch_losses = {
-        'total': [],
-        'action': [],
-        'dist': [],
-        'seg': []
-    }
-    
+    grad_accum = config.get("gradient_accumulation_steps", 1)
+    log_freq = config.get("print_log_freq", 100)
+    use_wandb = config.get("use_wandb", True)
+
     for batch_idx, batch in enumerate(dataloader):
-        # Handle both dict and tuple formats
-        if isinstance(batch, dict):
-            obs_images = batch['obs_images'].to(device)
-            goal_images = batch['goal_images'].to(device)
-            actions = batch['actions'].to(device)
-            distance = batch['distance'].to(device)
-            obs_seg_mask = batch.get('obs_seg_mask')  # Ground truth mask
-            action_mask = batch.get('action_mask')
-        else:
-            # Tuple format from original dataset
-            obs_images, goal_images, _, _, actions, distance, _, _, action_mask = batch
-            obs_images = obs_images.to(device)
-            goal_images = goal_images.to(device)
-            actions = actions.to(device)
-            distance = distance.to(device)
-            obs_seg_mask = None
+        # --- Data loading and moving to device ---
+        obs_images = batch['obs_images'].to(device)
+        goal_images = batch['goal_images'].to(device)
+        true_actions = batch['actions'].to(device)
+        true_distance = batch['distance'].to(device)
+        true_seg = batch.get('obs_seg_mask', None)
+        if true_seg is not None: true_seg = true_seg.to(device)
+        action_mask = batch.get('action_mask', None)
+        if action_mask is not None: action_mask = action_mask.to(device)
         
-        # Move masks to device if they exist
-        if obs_seg_mask is not None:
-            obs_seg_mask = obs_seg_mask.to(device)
-        if action_mask is not None:
-            action_mask = action_mask.to(device)
-        
-        # CRITICAL FIX: Model should NOT see ground truth segmentation!
-        # The model generates its own segmentation from RGB images
+        if batch_idx == 0:
+            if true_seg is not None and true_seg.sum() > 0:
+                print("✅ Using pre-labeled segmentation mask for training.")
+            else:
+                print("⚠️ Warning: No pre-labeled segmentation mask found. Using fallback/heuristic.")
+
+
+        # --- Forward pass with mixed precision ---
         with autocast(enabled=(scaler is not None)):
-            # Model only gets RGB images as input
-            outputs = model(obs_images, goal_images)  # NO obs_seg_mask here!
-            
-            # Loss function uses ground truth for supervision
+            outputs = model(obs_images, goal_images)
             losses = loss_fn(
-                pred_actions=outputs['action_pred'],
-                true_actions=actions,
-                pred_dist=outputs['dist_pred'].squeeze(),
-                true_dist=distance.float(),
-                pred_seg=outputs['obs_seg_logits'],  # Model's prediction
-                true_seg=obs_seg_mask,  # Ground truth for loss calculation
+                pred_actions=outputs['action_pred'], true_actions=true_actions,
+                pred_dist=outputs['dist_pred'].squeeze(), true_dist=true_distance.float(),
+                pred_seg=outputs['obs_seg_logits'], true_seg=true_seg,
                 action_mask=action_mask,
             )
         
-        loss = losses['total_loss'] / grad_accum
+        loss = losses['total_loss']
         
+        # SAFETY CHECK 1: Skip batch if loss is NaN or infinite
+        if not torch.isfinite(loss):
+            print(f" Warning: Skipping batch {batch_idx} due to invalid loss: {loss.item()}")
+            optimizer.zero_grad()
+            continue
+
+        # --- Backward pass ---
+        loss_scaled = loss / grad_accum
         if scaler:
-            scaler.scale(loss).backward()
+            scaler.scale(loss_scaled).backward()
         else:
-            loss.backward()
-        
-        # Gradient accumulation
+            loss_scaled.backward()
+
+        # --- Optimizer step with gradient accumulation ---
         if (batch_idx + 1) % grad_accum == 0:
             if scaler:
+                # <<< FIXED: This is the correct and safe way to use GradScaler >>>
+                # Unscale the gradients before clipping
                 scaler.unscale_(optimizer)
-                torch.nn.utils.clip_grad_norm_(model.parameters(), 0.5)
+                # Clip the now-unscaled gradients
+                torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+                # scaler.step() will check for NaNs/infs and skip the update if they are present
                 scaler.step(optimizer)
+                # Update the scale for the next iteration
                 scaler.update()
             else:
-                torch.nn.utils.clip_grad_norm_(model.parameters(), 0.5)
+                torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
                 optimizer.step()
             
-            optimizer.zero_grad()
-        
-        # Record losses
-        epoch_losses['total'].append(losses['total_loss'].item())
-        epoch_losses['action'].append(losses['action_loss'].item())
-        epoch_losses['dist'].append(losses['dist_loss'].item())
-        epoch_losses['seg'].append(losses['seg_loss'].item())
-        
+            optimizer.zero_grad(set_to_none=True)
+            
+            # Logging
+            if batch_idx % log_freq == 0 and use_wandb:
+                wandb.log({'train/total_loss': loss.item(), 'epoch': epoch})
         # Logging
         if batch_idx % log_freq == 0:
+            # <<< EDITED: Moved print statement here and added detailed losses >>>
             print(f"  Batch [{batch_idx:4d}/{len(dataloader)}] "
-                f"Loss: {losses['total_loss'].item():.4f} "
-                f"(Act: {losses['action_loss'].item():.3f}, "
-                f"Dist: {losses['dist_loss'].item():.3f}, "
-                f"Seg: {losses['seg_loss'].item():.3f})")
-            
+                  f"Loss: {losses['total_loss'].item():.4f} "
+                  f"(Act: {losses['action_loss'].item():.3f}, "
+                  f"Dist: {losses['dist_loss'].item():.3f}, "
+                  f"Seg: {losses['seg_loss'].item():.3f})")
             if use_wandb:
                 wandb.log({
-                    'train/total_loss': losses['total_loss'],
-                    'train/action_loss': losses['action_loss'],
-                    'train/dist_loss': losses['dist_loss'],
-                    'train/seg_loss': losses['seg_loss'],
-                    'train/batch_idx': epoch * len(dataloader) + batch_idx,
+                    'train/total_loss': losses['total_loss'].item(),
+                    'train/action_loss': losses['action_loss'].item(),
+                    'train/dist_loss': losses['dist_loss'].item(),
+                    'train/seg_loss': losses['seg_loss'].item(),
                     'epoch': epoch
                 })
-    
-    # Return epoch averages
-    return {
-        'total_loss': np.mean(epoch_losses['total']),
-        'action_loss': np.mean(epoch_losses['action']),
-        'dist_loss': np.mean(epoch_losses['dist']),
-        'seg_loss': np.mean(epoch_losses['seg'])
-    }
 
-def evaluate_and_log(model, test_dataloaders, device, epoch, use_wandb, stage):
-    """Evaluate and log metrics"""
+def evaluate_and_log(model, test_dataloaders, device, epoch, config, stage):
+    """Helper function to evaluate and log metrics."""
     model_module = get_model_module(model)
+    val_loader = next(iter(test_dataloaders.values()))
     
-    # Get first validation dataloader
-    val_loader_name = next(iter(test_dataloaders.keys()))
-    val_loader = test_dataloaders[val_loader_name]
-    
-    print(f"  Evaluating on {val_loader_name}...")
-    
-    # Run evaluation
+    print(f"\n--- Running evaluation for epoch {epoch} (Stage {stage}) ---")
     val_metrics = evaluate_segmentation_vint(
         model, val_loader, device, 
         num_seg_classes=model_module.num_seg_classes
     )
     
-    # Print key metrics
-    print(f"  Stage {stage} Epoch {epoch} Validation:")
-    print(f"    - mIoU: {val_metrics.get('seg/mIoU', 0):.3f}")
-    print(f"    - Success Rate: {val_metrics.get('nav/success_rate', 0):.3f}")
-    print(f"    - Collision Rate: {val_metrics.get('nav/collision_rate', 0):.3f}")
-    print(f"    - SPL: {val_metrics.get('nav/spl', 0):.3f}")
+    print(f"Validation Metrics: mIoU={val_metrics.get('seg/mIoU', 0):.3f}, fFloor IoU={val_metrics.get('seg/iou_class_0', 0):.3f}, Success Rate={val_metrics.get('nav/success_rate', 0):.3f}, fSPL={val_metrics.get('nav/spl', 0):.3f}")
     
-    # Log to wandb
-    if use_wandb:
-        wandb.log({
-            **{f'val/{k}': v for k, v in val_metrics.items()},
-            'epoch': epoch,
-            'stage': stage
-        })
-    
-    # Calculate total validation loss for scheduler
-    val_metrics['total_loss'] = (
-        val_metrics.get('nav/mean_goal_distance', 0) * 0.5 +
-        val_metrics.get('nav/collision_rate', 0) * 0.3 +
-        (1 - val_metrics.get('nav/success_rate', 0)) * 0.2
+    if config.get("use_wandb", True):
+        log_data = {f"val/{k.replace('/', '_')}": v for k, v in val_metrics.items()}
+        log_data.update({'epoch': epoch, 'stage': stage})
+        wandb.log(log_data)
+        
+    # Calculate a single score for schedulers and identifying the 'best' model
+    val_metrics['val_score'] = (
+        val_metrics.get('nav/mean_goal_distance', 1.0) * 0.5 +
+        val_metrics.get('nav/collision_rate', 1.0) * 0.3 +
+        (1 - val_metrics.get('nav/spl', 0.0)) * 0.2
     )
     
     return val_metrics

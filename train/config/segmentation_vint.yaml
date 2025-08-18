@@ -35,13 +35,13 @@ use_pseudo_labels: false
 # ==================================================================
 # Training Parameters
 # ==================================================================
-epochs: 90
-lr: 1e-4
+epochs: 80
+lr: 5e-5
 
 # FuSe schedule epochs
-stage1_epochs: 20  # Frozen ViNT
+stage1_epochs: 30 # Frozen ViNT
 stage2_epochs: 40  # Unfrozen ViNT with lower LR
-# Stage 3 uses remaining epochs (100 - 30 - 40 = 30)
+# Stage 3 uses remaining epochs (80 - 30 - 40 = 10)
 
 batch_size: 16
 eval_batch_size: 64
@@ -62,8 +62,8 @@ max_norm: 1.0  # ADD THIS
 # ==================================================================
 # These are used if uncertainty weighting is disabled
 action_loss_weight: 1.5
-dist_loss_weight: 0.2
-seg_loss_weight: 0.1
+dist_loss_weight: 0.1
+seg_loss_weight: 0.3
 
 # ==================================================================
 # Data Parameters

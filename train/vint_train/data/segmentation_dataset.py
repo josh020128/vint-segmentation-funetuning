@@ -113,31 +113,25 @@ class ViNTSegmentationDataset(ViNT_Dataset):
         return torch.zeros(self.image_size, dtype=torch.long)
     
     def load_mask_from_file(self, mask_path: str) -> torch.Tensor:
-        """Load segmentation mask from file"""
+        """Loads a grayscale mask from a file, ensuring correct class indices."""
         try:
-            seg_mask = Image.open(mask_path)
+            mask_pil = Image.open(mask_path)
             
-            # Convert to grayscale if needed
-            if seg_mask.mode != 'L':
-                seg_mask = seg_mask.convert('L')
+            # Ensure the mask is in single-channel grayscale mode ('L')
+            if mask_pil.mode != 'L':
+                mask_pil = mask_pil.convert('L')
             
-            # Resize to match image size (PIL expects width, height)
-            seg_mask = seg_mask.resize(
-                (self.image_size[1], self.image_size[0]),
-                Image.NEAREST  # Use nearest neighbor for masks
+            # Resize first to ensure consistent dimensions
+            resized_mask = mask_pil.resize(
+                (self.image_size[1], self.image_size[0]), 
+                Image.NEAREST # Use nearest neighbor to preserve class labels
             )
             
-            # Convert to numpy then tensor
-            seg_array = np.array(seg_mask)
+            mask_np = np.array(resized_mask)
             
-            # Convert to tensor
-            seg_tensor = torch.tensor(seg_array, dtype=torch.long)
-            
-            # Clamp to valid range
-            seg_tensor = torch.clamp(seg_tensor, 0, self.num_classes - 1)
-            
-            return seg_tensor
-            
+            # The values in the file (0, 1, 2, 3, 4) are already the correct class indices
+            return torch.from_numpy(mask_np.astype(np.int64))
+
         except Exception as e:
             print(f"Error loading mask from {mask_path}: {e}")
             return self.generate_heuristic_mask()
@@ -225,7 +219,6 @@ class ViNTSegmentationDataset(ViNT_Dataset):
         # Load segmentation masks for current observation and goal
         obs_seg_path = get_data_path(self.data_folder, f_curr, curr_time)
         goal_seg_path = get_data_path(self.data_folder, f_goal, goal_time)
-        
         obs_seg_mask = self.load_segmentation_mask(obs_seg_path)  # Shape: (H, W)
         goal_seg_mask = self.load_segmentation_mask(goal_seg_path)  # Shape: (H, W)
         

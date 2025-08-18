@@ -36,9 +36,31 @@ class SegmentationMetrics:
         self.confusion_matrix += cm
 
     def get_metrics(self) -> Dict[str, float]:
-        iou = np.diag(self.confusion_matrix) / (self.confusion_matrix.sum(axis=1) + self.confusion_matrix.sum(axis=0) - np.diag(self.confusion_matrix) + 1e-8)
-        miou = np.nanmean(iou)
-        return {'mIoU': miou}
+        """ <<< REVISED: Now calculates and returns IoU for each class. >>> """
+        metrics = {}
+        
+        # Use np.diag to get all true positives at once
+        true_positives = np.diag(self.confusion_matrix)
+        # Use .sum() to get false positives and false negatives
+        false_positives = self.confusion_matrix.sum(axis=0) - true_positives
+        false_negatives = self.confusion_matrix.sum(axis=1) - true_positives
+        
+        # Calculate IoU for each class, avoiding division by zero
+        denominator = true_positives + false_positives + false_negatives
+        iou = np.divide(true_positives, denominator, out=np.zeros_like(denominator, dtype=float), where=denominator!=0)
+        
+        for i in range(self.num_classes):
+            metrics[f'iou_class_{i}'] = iou[i]
+        
+        # Mean IoU
+        metrics['mIoU'] = np.nanmean(iou)
+        
+        # Pixel accuracy
+        total_correct = true_positives.sum()
+        total_pixels = self.confusion_matrix.sum()
+        metrics['pixel_accuracy'] = total_correct / (total_pixels + 1e-8)
+        
+        return metrics
 
 class NavigationMetrics:
     """Calculates standard navigation metrics like success rate."""
@@ -51,6 +73,7 @@ class NavigationMetrics:
         self.collisions = []
         self.goal_distances = []
         self.path_lengths_ratio = []
+        self.spl_scores = []
 
     def update(self, pred_waypoints: torch.Tensor, true_waypoints: torch.Tensor, seg_pred: torch.Tensor, obstacle_classes: List[int]):
         pred_traj = pred_waypoints.detach().cpu().numpy()
@@ -66,18 +89,28 @@ class NavigationMetrics:
             has_collision = self._check_collision(pred_traj[i], seg_pred[i], obstacle_classes)
             self.collisions.append(has_collision)
 
+            is_success = goal_dist < self.success_threshold
+            if is_success:
+                true_len = np.sum(np.linalg.norm(true_traj[1:] - true_traj[:-1], axis=-1))
+                pred_len = np.sum(np.linalg.norm(pred_traj[1:] - pred_traj[:-1], axis=-1))
+                spl = true_len / max(true_len, pred_len, 1e-8)
+                self.spl_scores.append(spl)
+            else:
+                self.spl_scores.append(0.0)
+
     def _check_collision(self, trajectory: np.ndarray, seg_map: torch.Tensor, obstacle_classes: List[int]) -> bool:
         if seg_map.dim() == 3:
             seg_map = torch.argmax(seg_map, dim=0)
         
         h, w = seg_map.shape
-        pixel_coords = np.zeros_like(trajectory)
+        pixel_coords = np.zeros_like(trajectory, dtype=int)
         pixel_coords[:, 0] = np.clip((trajectory[:, 0] + 1) * w / 2, 0, w - 1)
-        pixel_coords[:, 1] = np.clip((1 - trajectory[:, 1]) * h / 2, 0, h - 1)
+        # The y-coordinate now starts from the middle of the image (h/2) and goes down.
+        pixel_coords[:, 1] = np.clip(h / 2 + (trajectory[:, 1] * h / 2), 0, h - 1)
         
-        for x, y in pixel_coords.astype(int):
-            if seg_map[y, x] in obstacle_classes:
-                return True
+        for x, y in pixel_coords:
+            if seg_map[y, x] != 0: #floor index
+                return True # Collision if not on the floor
         return False
 
     def get_metrics(self) -> Dict[str, float]:
@@ -85,12 +118,13 @@ class NavigationMetrics:
             'success_rate': np.mean(self.success) if self.success else 0.0,
             'collision_rate': np.mean(self.collisions) if self.collisions else 0.0,
             'mean_goal_distance': np.mean(self.goal_distances) if self.goal_distances else 0.0,
+            'spl': np.mean(self.spl_scores) if self.spl_scores else 0.0,
         }
 
 class CombinedMetrics:
     """Combines all metrics for a comprehensive evaluation."""
     def __init__(self, num_seg_classes: int, **kwargs):
-        self.obstacle_classes = kwargs.get('obstacle_classes', [1, 3]) # wall, furniture
+        self.obstacle_classes = kwargs.get('obstacle_classes', [1, 3, 4]) # wall, furniture, and unknown
         self.walkable_classes = kwargs.get('walkable_classes', [0])   # floor
         self.seg_metrics = SegmentationMetrics(num_seg_classes)
         self.nav_metrics = NavigationMetrics(**kwargs)
