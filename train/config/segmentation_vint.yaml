@@ -3,6 +3,8 @@ project_name: "segmentation_vint"
 run_name: "seg_vint_fuse_scand"
 use_wandb: true
 
+model_type: "segmentation_vint"
+
 # ==================================================================
 # Model Parameters
 # ==================================================================
@@ -35,11 +37,11 @@ use_pseudo_labels: false
 # ==================================================================
 # Training Parameters
 # ==================================================================
-epochs: 80
+epochs: 60
 lr: 5e-5
 
 # FuSe schedule epochs
-stage1_epochs: 30 # Frozen ViNT
+stage1_epochs: 20 # Frozen ViNT
 stage2_epochs: 40  # Unfrozen ViNT with lower LR
 # Stage 3 uses remaining epochs (80 - 30 - 40 = 10)
 

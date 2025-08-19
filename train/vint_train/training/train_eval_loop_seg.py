@@ -85,7 +85,7 @@ def train_eval_loop_segmentation(
     model_module = get_model_module(model)
     
     lr_config = config["lr_schedule"]
-    stage1_epochs = config.get("stage1_epochs", 30)
+    stage1_epochs = config.get("stage1_epochs", 20)
     stage2_epochs = config.get("stage2_epochs", 40)
     
     loss_fn = SegmentationNavigationLoss(use_uncertainty_weighting=True)
@@ -137,10 +137,10 @@ def train_eval_loop_segmentation(
                 evaluate_and_log(model, test_dataloaders, device, total_epochs_trained, config, stage=2)
                 visualize_batch(model, next(iter(dataloader)), device, total_epochs_trained, 2, project_folder)
             total_epochs_trained += 1
-        save_checkpoint(model, stage2_optimizer, stage2_scheduler, total_epochs_trained, project_folder)
+        save_checkpoint(model, stage2_optimizer, stage2_scheduler, total_epochs_trained, project_folder, True)
 
     # --- STAGE 3: Fine-tune everything ---
-    remaining_epochs = epochs - total_epochs_trained
+    """remaining_epochs = epochs - total_epochs_trained
     if start_stage <= 3 and remaining_epochs > 0:
         print(f"\n{'='*60}\nSTAGE 3: Full Fine-tuning\n{'='*60}")
         stage3_optimizer = torch.optim.AdamW(model.parameters(), lr=lr_config["stage3"])
@@ -162,7 +162,7 @@ def train_eval_loop_segmentation(
             if is_best: best_val_score = val_score
             
             save_checkpoint(model, stage3_optimizer, stage3_scheduler, total_epochs_trained, project_folder, is_best=is_best)
-            total_epochs_trained += 1
+            total_epochs_trained += 1"""
 
     print(f"\n{'='*60}\n Training Complete! Best validation score: {best_val_score:.4f}\n{'='*60}")
 

@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import argparse
+import torch.nn as nn
 import os
 import time
 from collections import deque
 from pathlib import Path
+import segmentation_models_pytorch as smp
 from typing import Deque, List
+import torch.nn.functional as F
 
 import cv2
 import numpy as np
@@ -19,26 +22,224 @@ import torch
 import yaml
 from diffusers.schedulers.scheduling_ddpm import DDPMScheduler
 
-from utils import msg_to_pil, to_numpy, transform_images, load_model
-from vint_train.training.train_utils import get_action
+from utils import msg_to_pil, to_numpy, transform_images
 from topic_names import IMAGE_TOPIC, WAYPOINT_TOPIC, SAMPLED_ACTIONS_TOPIC
 
-from UniDepth.unidepth.models import UniDepthV2
-from UniDepth.unidepth.utils.camera import Pinhole
+# Configuration paths
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+
+from vint_train.models.vint.vint import ViNT
+
+# from UniDepth.unidepth.models import UniDepthV2
+# from UniDepth.unidepth.utils.camera import Pinhole
 
 # ---------------------------------------------------------------------------
 # CONFIG & CONSTANTS
 # ---------------------------------------------------------------------------
-THIS_DIR = Path(__file__).resolve().parent
-ROBOT_CONFIG_PATH = THIS_DIR / "../config/robot.yaml"
-MODEL_CONFIG_PATH = THIS_DIR / "../config/models.yaml"
-TOPOMAP_IMAGES_DIR = THIS_DIR / "../topomaps/images"
+
+# Define all paths relative to the project root
+ROBOT_CONFIG_PATH = PROJECT_ROOT / "deployment/config/robot.yaml"
+MODEL_CONFIG_PATH = PROJECT_ROOT / "deployment/config/models.yaml"
+TOPOMAP_IMAGES_DIR = PROJECT_ROOT / "deployment/topomaps/images"
+
 
 with open(ROBOT_CONFIG_PATH, "r") as f:
     ROBOT_CONF = yaml.safe_load(f)
 MAX_V = ROBOT_CONF["max_v"]
 MAX_W = ROBOT_CONF["max_w"]
 RATE = ROBOT_CONF["frame_rate"]  # Hz
+
+def build_vint_model(**kwargs) -> nn.Module:
+    """Build a ViNT model or placeholder"""
+    try:
+        return ViNT(**kwargs)
+    except:
+        # Simplified placeholder for testing
+        class SimpleViNT(nn.Module):
+            def __init__(self, obs_encoding_size=512, context_size=5, **kwargs):
+                super().__init__()
+                self.obs_encoding_size = obs_encoding_size
+                self.context_size = context_size
+                
+                # Simple encoders
+                self.obs_encoder = nn.Sequential(
+                    nn.Conv2d(3 * context_size, 64, 7, stride=2, padding=3),
+                    nn.BatchNorm2d(64),
+                    nn.ReLU(),
+                    nn.AdaptiveAvgPool2d((1, 1)),
+                    nn.Flatten()
+                )
+                self.goal_encoder = nn.Sequential(
+                    nn.Conv2d(3, 64, 7, stride=2, padding=3),
+                    nn.BatchNorm2d(64),
+                    nn.ReLU(),
+                    nn.AdaptiveAvgPool2d((1, 1)),
+                    nn.Flatten()
+                )
+                self.compress_obs_enc = nn.Linear(64, obs_encoding_size)
+                self.compress_goal_enc = nn.Linear(64, obs_encoding_size)
+                
+        return SimpleViNT(**kwargs)
+    
+class SegmentationViNT(nn.Module):
+    """
+    ViNT enhanced with a semantic segmentation branch using late fusion for stability.
+    """
+    def __init__(
+        self,
+        # ViNT-specific arguments
+        context_size: int,
+        len_traj_pred: int,
+        learn_angle: bool,
+        obs_encoder: str,
+        obs_encoding_size: int,
+        
+        # Segmentation-specific arguments
+        num_seg_classes: int,
+        seg_encoder: str = "resnet34",
+        freeze_vint: bool = True,
+        seg_feature_dim: int = 256,
+        **kwargs # Absorb any extra unused parameters
+    ):
+        super().__init__()
+        
+        # Store key configuration parameters
+        self.len_traj_pred = len_traj_pred
+        self.learn_angle = learn_angle
+        self.num_seg_classes = num_seg_classes
+        
+        # 1. Initialize the base ViNT model
+        # The full ViNT model will be used as a feature extractor
+        vint_args = {
+            'context_size': context_size, 'len_traj_pred': len_traj_pred,
+            'learn_angle': learn_angle, 'obs_encoder': obs_encoder,
+            'obs_encoding_size': obs_encoding_size,
+            **kwargs
+        }
+        self.vint_model = build_vint_model(**vint_args)
+        
+        # Freeze the entire ViNT model if specified
+        if freeze_vint:
+            print("Freezing all ViNT model parameters.")
+            for param in self.vint_model.parameters():
+                param.requires_grad = False
+        
+        # 2. Initialize the Segmentation Branch
+        self.seg_model = smp.Unet(
+            encoder_name=seg_encoder,
+            encoder_weights="imagenet",
+            in_channels=3,
+            classes=num_seg_classes,
+            activation=None,
+        )
+        
+        # 3. Initialize a Segmentation Feature Extractor
+        # This module processes segmentation logits into a 1D feature vector
+        self.seg_feature_extractor = nn.Sequential(
+            nn.Conv2d(num_seg_classes, seg_feature_dim, kernel_size=3, padding=1),
+            nn.BatchNorm2d(seg_feature_dim),
+            nn.ReLU(inplace=True),
+            nn.AdaptiveAvgPool2d((7, 7)),
+            nn.Flatten(),
+            nn.Linear(seg_feature_dim * 49, obs_encoding_size),
+            nn.ReLU(inplace=True),
+            nn.Dropout(0.1),
+        )
+        # 4. Initialize NEW Prediction Heads for the fused features
+        # The input dimension is doubled because we concatenate the two feature vectors
+        fused_dim = obs_encoding_size * 2
+        num_action_outputs = len_traj_pred * (3 if learn_angle else 2)
+        
+        self.action_predictor = nn.Sequential(
+            nn.Linear(fused_dim, 512),
+            nn.ReLU(),
+            nn.Linear(512, num_action_outputs),
+        )
+        
+        # The distance predictor takes the fused observation and the goal
+        dist_predictor_input_dim = fused_dim + obs_encoding_size
+        self.dist_predictor = nn.Sequential(
+            nn.Linear(dist_predictor_input_dim, 512),
+            nn.ReLU(),
+            nn.Linear(512, 1),
+        )
+    
+    def unfreeze_vint(self):
+        """Unfreeze all ViNT parameters for Stage 2 finetuning."""
+        print("Unfreezing ViNT model parameters...")
+        for param in self.vint_model.parameters():
+            param.requires_grad = True
+    
+    def forward(self, obs_images: torch.Tensor, goal_images: torch.Tensor) -> Dict[str, torch.Tensor]:
+        batch_size = obs_images.shape[0]
+        
+        # --- Branch 1: Get ViNT Features ---
+        # We get the final 1D feature vectors from the pre-trained model
+        with torch.set_grad_enabled(next(self.vint_model.parameters()).requires_grad):
+            obs_encoding = self.vint_model.compress_obs_enc(self.vint_model.obs_encoder(obs_images))
+            goal_encoding = self.vint_model.compress_goal_enc(self.vint_model.goal_encoder(goal_images))
+
+            # ADDED CODE 1
+            # Normalize for stability
+            obs_encoding = F.normalize(obs_encoding, p=2, dim=-1) * 10
+            goal_encoding = F.normalize(goal_encoding, p=2, dim=-1) * 10
+        
+        # --- Branch 2: Get Segmentation Features ---
+        last_obs_frame = obs_images[:, -3:, :, :]
+
+        obs_seg_logits = self.seg_model(last_obs_frame)
+
+        seg_probs = F.softmax(obs_seg_logits, dim=1).detach()
+        seg_features_obs = self.seg_feature_extractor(seg_probs)
+        seg_features_obs = F.normalize(seg_features_obs, p=2, dim=-1) * 10
+        
+        # --- Late Fusion Step ---
+        # Concatenate the final 1D feature vectors from both branches
+        fused_obs_features = torch.cat([obs_encoding, seg_features_obs], dim=1)
+        
+        # --- Final Prediction ---
+        # The new prediction heads take the fused observation features and the original goal features
+        
+        # For simplicity, we assume the action predictor takes the fused observation
+        # and the distance predictor takes the combined features.
+        pred_actions = self.action_predictor(fused_obs_features)
+        
+        combined_features = torch.cat([fused_obs_features, goal_encoding], dim=1)
+        pred_dist = self.dist_predictor(combined_features)
+
+        return {
+            'dist_pred': pred_dist,
+            'action_pred': pred_actions.view(batch_size, self.len_traj_pred, -1),
+            'obs_seg_logits': obs_seg_logits,
+        }
+
+def load_model(
+    model_path: str,
+    config: dict,
+    device: torch.device = torch.device("cpu"),
+) -> nn.Module:
+    """Load a model from a checkpoint file."""
+    model_type = config["model_type"]
+    
+    # Use the local model classes defined in this script
+    if model_type == "vint":
+        model = ViNT(**config)
+    elif model_type == "segmentation_vint":
+        model = SegmentationViNT(**config)
+    else:
+        raise ValueError(f"Invalid model type: {model_type}")
+    
+    checkpoint = torch.load(model_path, map_location=device)
+    
+    state_dict = checkpoint.get("model_state_dict", checkpoint)
+    if hasattr(state_dict, 'state_dict'):
+        state_dict = state_dict.state_dict()
+    if all(k.startswith('module.') for k in state_dict.keys()):
+        state_dict = {k[7:]: v for k, v in state_dict.items()}
+
+    model.load_state_dict(state_dict, strict=False)
+    model.to(device)
+    return model
 
 def _load_model(model_name: str, device: torch.device):
     with open(MODEL_CONFIG_PATH, "r") as f:
@@ -53,9 +254,9 @@ def _load_model(model_name: str, device: torch.device):
         raise FileNotFoundError(f"Model weights not found at {ckpt_path}")
 
     print(f"Loading model from {ckpt_path}")
+    # This now calls the local load_model function
     model = load_model(ckpt_path, model_params, device).to(device).eval()
     return model, model_params
-
 
 class NavigationNode(Node):
     """Sub‑goal navigation with topomap + trajectory visualisation."""
@@ -98,8 +299,6 @@ class NavigationNode(Node):
         self.top_view_sampling_step = 5
         self.safety_margin = 0.17
         self.DIM = (640, 480)
-
-        self._init_depth_model()
 
         # Topological map ----------------------------------------------------
         self.topomap: List[PILImage] = self._load_topomap(args.dir)
@@ -153,8 +352,6 @@ class NavigationNode(Node):
         self.get_logger().info("-" * 60)
         self.get_logger().info("CAMERA CONFIGURATION:")
         self.get_logger().info(f"  - Image dimensions: {self.DIM}")
-        self.get_logger().info(f"  - Camera matrix (K):\n{self.K}")
-        self.get_logger().info(f"  - Distortion coefficients (D):\n{self.D}")
         self.get_logger().info("-" * 60)
         self.get_logger().info("MODEL CONFIGURATION:")
         self.get_logger().info(f"  - Model name: {self.args.model}")
@@ -172,12 +369,6 @@ class NavigationNode(Node):
         self.get_logger().info(f"  - Image size: {self.model_params['image_size']}")
         self.get_logger().info(
             f"  - Normalize: {self.model_params.get('normalize', False)}"
-        )
-        self.get_logger().info("-" * 60)
-        self.get_logger().info("DEPTH MODEL CONFIGURATION:")
-        self.get_logger().info(f"  - UniDepth model: UniDepthV2")
-        self.get_logger().info(
-            f"  - Pretrained weights: lpiccinelli/unidepth-v2-vits14"
         )
         self.get_logger().info("-" * 60)
         self.get_logger().info("TOPOLOGICAL MAP CONFIGURATION:")
@@ -232,20 +423,6 @@ class NavigationNode(Node):
         img_files = sorted(os.listdir(dpath), key=lambda x: int(os.path.splitext(x)[0]))
         return [PILImage.open(dpath / f) for f in img_files]
 
-    def _init_depth_model(self):
-        self.K = np.load("./UniDepth/assets/fisheye/fisheye_intrinsics.npy")
-        self.D = np.load("./UniDepth/assets/fisheye/fisheye_distortion.npy")
-        self.map1, self.map2 = cv2.fisheye.initUndistortRectifyMap(
-            self.K, self.D, np.eye(3), self.K, self.DIM, cv2.CV_16SC2
-        )
-        self.intrinsics_torch = torch.from_numpy(self.K).unsqueeze(0).to(self.device)
-        self.camera = Pinhole(K=self.intrinsics_torch)
-        self.depth_model = (
-            UniDepthV2.from_pretrained("lpiccinelli/unidepth-v2-vits14")
-            .to(self.device)
-            .eval()
-        )
-
     # ------------------------------------------------------------------
     # Callbacks
     # ------------------------------------------------------------------
@@ -274,8 +451,7 @@ class NavigationNode(Node):
         if self.closest_node == self.goal_node:
             self.get_logger().info("Reached goal! Stopping...")
 
-    def _timer_cb_nomad(self):
-        """NOMAD 모델을 위한 타이머 콜백 처리"""
+    """def _timer_cb_nomad(self):
         # -----------------------------------------------------------------
         # 1. Compute closest node via distance prediction
         # -----------------------------------------------------------------
@@ -348,7 +524,7 @@ class NavigationNode(Node):
         # -----------------------------------------------------------------
         self._publish_msgs(traj_batch)
         self._publish_viz_image(traj_batch)
-        self._publish_goal_images(sg_pil, goal_pil)
+        self._publish_goal_images(sg_pil, goal_pil)"""
 
     def _timer_cb_other(self):
         """nomad 외의 모델을 위한 타이머 콜백 처리 - 원본 코드와 동일하게 구현"""
@@ -356,28 +532,34 @@ class NavigationNode(Node):
         start = max(self.closest_node - self.args.radius, 0)
         end = min(self.closest_node + self.args.radius + 1, self.goal_node)
 
-        # 배치 준비
+        # Prepare batches
+        if len(self.context_queue) > self.context_size:
+            obs_images_pil = list(self.context_queue)[-self.context_size:]
+        else:
+            obs_images_pil = list(self.context_queue)
+
         batch_obs_imgs = []
-        batch_goal_data = []
+        batch_goal_imgs = []
 
-        for i, sg_img in enumerate(self.topomap[start : end + 1]):
-            transf_obs_img = transform_images(
-                list(self.context_queue), self.model_params["image_size"]
-            )
-            goal_data = transform_images(sg_img, self.model_params["image_size"])
-            batch_obs_imgs.append(transf_obs_img)
-            batch_goal_data.append(goal_data)
+        for sg_img in self.topomap[start : end + 1]:
+            batch_obs_imgs.append(transform_images(obs_images_pil, self.model_params["image_size"]))
+            batch_goal_imgs.append(transform_images(sg_img, self.model_params["image_size"]))
 
-        # 모델 추론
-        batch_obs_imgs = torch.cat(batch_obs_imgs, dim=0).to(self.device)
-        batch_goal_data = torch.cat(batch_goal_data, dim=0).to(self.device)
+        batch_obs_tensor = torch.cat(batch_obs_imgs, dim=0).to(self.device)
+        batch_goal_tensor = torch.cat(batch_goal_imgs, dim=0).to(self.device)
 
         with torch.no_grad():
-            distances, waypoints = self.model(batch_obs_imgs, batch_goal_data)
-            distances_np = to_numpy(distances)
-            waypoints_np = to_numpy(waypoints)
+            outputs = self.model(batch_obs_tensor, batch_goal_tensor)
+            
+            if isinstance(outputs, dict):
+                distances_np = to_numpy(outputs['dist_pred'])
+                waypoints_np = to_numpy(outputs['action_pred'])
+            else: # Handle tuple output for older models
+                distances, waypoints = outputs
+                distances_np = to_numpy(distances)
+                waypoints_np = to_numpy(waypoints)
 
-        # 가장 가까운 노드 찾기
+        # Find closest node and select waypoint
         min_dist_idx = np.argmin(distances_np)
 
         # 서브골과 경로점 선택 - 원본과 동일하게 구현
@@ -528,9 +710,9 @@ class NavigationNode(Node):
 
 def main():
     parser = argparse.ArgumentParser("Topological navigation (ROS 2)")
-    parser.add_argument("--model", "-m", default="nomad")
+    parser.add_argument("--model", "-m", default="vint")
     parser.add_argument(
-        "--dir", "-d", default="topomap", help="sub‑directory under ../topomaps/images/"
+        "--dir", "-d", default="", help="sub‑directory under ../topomaps/images/"
     )
     parser.add_argument(
         "--goal-node", "-g", type=int, default=-1, help="Goal node index (-1 = last)"

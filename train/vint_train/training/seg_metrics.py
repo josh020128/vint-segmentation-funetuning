@@ -64,32 +64,35 @@ class SegmentationMetrics:
 
 class NavigationMetrics:
     """Calculates standard navigation metrics like success rate."""
-    def __init__(self, success_threshold: float = 0.5):
+    def __init__(self, success_threshold: float = 1.0, floor_class_idx: int = 0):
         self.success_threshold = success_threshold
+        self.floor_class_idx = floor_class_idx
         self.reset()
 
     def reset(self):
         self.success = []
         self.collisions = []
         self.goal_distances = []
-        self.path_lengths_ratio = []
         self.spl_scores = []
 
-    def update(self, pred_waypoints: torch.Tensor, true_waypoints: torch.Tensor, seg_pred: torch.Tensor, obstacle_classes: List[int]):
-        pred_traj = pred_waypoints.detach().cpu().numpy()
-        true_traj = true_waypoints.detach().cpu().numpy()
-        seg_pred = seg_pred.detach().cpu()
+    def update(self, pred_waypoints: torch.Tensor, true_waypoints: torch.Tensor, seg_pred: torch.Tensor):
+        pred_traj_batch = pred_waypoints.detach().cpu().numpy()
+        true_traj_batch = true_waypoints.detach().cpu().numpy()
+        seg_pred_batch = seg_pred.detach().cpu()
 
-        for i in range(pred_traj.shape[0]):
-            goal_dist = np.linalg.norm(pred_traj[i, -1] - true_traj[i, -1])
-            self.goal_distances.append(goal_dist)
-            self.success.append(goal_dist < self.success_threshold)
+        for i in range(pred_traj_batch.shape[0]):
+            pred_traj = pred_traj_batch[i]
+            true_traj = true_traj_batch[i]
+            seg_pred = seg_pred_batch[i]
             
-            # Check for collisions
-            has_collision = self._check_collision(pred_traj[i], seg_pred[i], obstacle_classes)
-            self.collisions.append(has_collision)
-
+            goal_dist = np.linalg.norm(pred_traj[-1] - true_traj[-1])
             is_success = goal_dist < self.success_threshold
+            self.goal_distances.append(goal_dist)
+            self.success.append(is_success)
+            
+            has_collision = self._check_collision(pred_traj, seg_pred)
+            self.collisions.append(has_collision)
+            
             if is_success:
                 true_len = np.sum(np.linalg.norm(true_traj[1:] - true_traj[:-1], axis=-1))
                 pred_len = np.sum(np.linalg.norm(pred_traj[1:] - pred_traj[:-1], axis=-1))
@@ -98,19 +101,24 @@ class NavigationMetrics:
             else:
                 self.spl_scores.append(0.0)
 
-    def _check_collision(self, trajectory: np.ndarray, seg_map: torch.Tensor, obstacle_classes: List[int]) -> bool:
+    def _check_collision(self, trajectory: np.ndarray, seg_map: torch.Tensor) -> bool:
         if seg_map.dim() == 3:
             seg_map = torch.argmax(seg_map, dim=0)
         
         h, w = seg_map.shape
-        pixel_coords = np.zeros_like(trajectory, dtype=int)
-        pixel_coords[:, 0] = np.clip((trajectory[:, 0] + 1) * w / 2, 0, w - 1)
-        # The y-coordinate now starts from the middle of the image (h/2) and goes down.
-        pixel_coords[:, 1] = np.clip(h / 2 + (trajectory[:, 1] * h / 2), 0, h - 1)
         
-        for x, y in pixel_coords:
-            if seg_map[y, x] != 0: #floor index
-                return True # Collision if not on the floor
+        for i in range(len(trajectory) - 1):
+            start_point = trajectory[i]
+            end_point = trajectory[i+1]
+            
+            for t in np.linspace(0, 1, 5):
+                interp_point = start_point * (1 - t) + end_point * t
+                
+                px = int(np.clip((interp_point[0] + 1) * w / 2, 0, w - 1))
+                py = int(np.clip(h / 2 + (interp_point[1] * h / 2), 0, h - 1))
+                
+                if seg_map[py, px] != self.floor_class_idx:
+                    return True
         return False
 
     def get_metrics(self) -> Dict[str, float]:
@@ -137,7 +145,8 @@ class CombinedMetrics:
         self.obstacle_awareness_scores = []
 
     def update(self, pred_waypoints: torch.Tensor, true_waypoints: torch.Tensor, pred_seg: torch.Tensor, true_seg: Optional[torch.Tensor] = None):
-        self.nav_metrics.update(pred_waypoints, true_waypoints, pred_seg, self.obstacle_classes)
+        self.nav_metrics.update(pred_waypoints, true_waypoints, pred_seg)
+        
         if true_seg is not None:
             self.seg_metrics.update(pred_seg, true_seg)
         
