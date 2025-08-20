@@ -22,6 +22,9 @@ import torch
 import yaml
 from diffusers.schedulers.scheduling_ddpm import DDPMScheduler
 
+# <<< ADDED: Imports for the standalone OneFormer test model >>>
+from transformers import OneFormerProcessor, OneFormerForUniversalSegmentation
+
 from utils import msg_to_pil, to_numpy, transform_images
 from topic_names import IMAGE_TOPIC, WAYPOINT_TOPIC, SAMPLED_ACTIONS_TOPIC
 
@@ -324,6 +327,16 @@ class NavigationNode(Node):
         else:
             raise ValueError(f"Unknown robot type: {args.robot}")
 
+        self.seg_colors = np.array([
+            [0, 255, 0],    # 0: floor (green)
+            [255, 0, 0],    # 1: wall (red)
+            [255, 255, 0],  # 2: door (yellow)
+            [0, 0, 255],    # 3: furniture (blue)
+            [128, 128, 128] # 4: unknown (gray)
+        ], dtype=np.uint8)
+
+
+
         self.create_subscription(Image, image_topic, self._image_cb, 1)
         self.waypoint_pub = self.create_publisher(Float32MultiArray, waypoint_topic, 1)
         self.sampled_actions_pub = self.create_publisher(
@@ -331,9 +344,24 @@ class NavigationNode(Node):
         )
         self.goal_pub = self.create_publisher(Bool, "/topoplan/reached_goal", 1)
         self.viz_pub = self.create_publisher(Image, "navigation_viz", 1)
+        self.seg_viz_pub = self.create_publisher(Image, "navigation_seg_viz", 1)
         self.subgoal_pub = self.create_publisher(Image, "navigation_subgoal", 1)
         self.goal_pub_img = self.create_publisher(Image, "navigation_goal", 1)
         self.create_timer(1.0 / RATE, self._timer_cb)
+        self.get_logger().info("Navigation node initialised. Waiting for images…")
+
+        # <<< ADDED: Logic for the standalone OneFormer test >>>
+
+        self.get_logger().info("--- OneFormer Test Mode Enabled ---")
+        self.oneformer_pub = self.create_publisher(Image, "/oneformer_seg_viz", 1)
+        self.oneformer_processor = OneFormerProcessor.from_pretrained("shi-labs/oneformer_ade20k_swin_tiny")
+        self.oneformer_model = OneFormerForUniversalSegmentation.from_pretrained(
+                "shi-labs/oneformer_ade20k_swin_tiny",
+                use_safetensors=True
+            ).to(self.device).eval()
+        self.setup_oneformer_class_map()
+        self.get_logger().info("OneFormer model loaded for real-time testing.")
+
         self.get_logger().info("Navigation node initialised. Waiting for images…")
 
         # 시작하기 전에 중요한 파라미터들 출력
@@ -427,15 +455,51 @@ class NavigationNode(Node):
     # Callbacks
     # ------------------------------------------------------------------
 
+    def setup_oneformer_class_map(self):
+        """Creates the lookup table to map ADE20K classes to our nav classes."""
+        self.oneformer_lookup_table = np.full(150, fill_value=4, dtype=np.uint8) # Default to unknown
+        ade20k_to_nav = {
+            3: 0, 6: 0, 11: 0, 13: 0, 29: 0, 53: 0, # Floors/walkable
+            0: 1, 1: 1, 5: 1, 25: 1,                 # Walls/barriers
+            14: 2,                                   # Doors
+            7: 3, 10: 3, 15: 3, 19: 3, 24: 3, 31: 3, 33: 3, 65: 3, # Furniture
+        }
+        for ade_class, nav_class in ade20k_to_nav.items():
+            if ade_class < 150:
+                self.oneformer_lookup_table[ade_class] = nav_class
+
     def _image_cb(self, msg: Image):
         now = self.get_clock().now()
         if (now - self.last_ctx_time).nanoseconds < self.ctx_dt * 1e9:
             return  # 아직 0.25 s 안 지났으면 무시
         self.context_queue.append(msg_to_pil(msg))
         self.last_ctx_time = now
+
+        # <<< ADDED: Run OneFormer inference on every new frame if in test mode >>>
+        self.run_and_publish_oneformer(msg_to_pil(msg))
+
         self.get_logger().info(
             f"Image added to context queue ({len(self.context_queue)})"
         )
+
+    def run_and_publish_oneformer(self, image: PILImage.Image):
+        """Runs OneFormer on a single image and publishes the colored mask."""
+        with torch.no_grad():
+            inputs = self.oneformer_processor(images=image, task_inputs=["semantic"], return_tensors="pt").to(self.device)
+            outputs = self.oneformer_model(**inputs)
+            
+            # Post-process to get the final segmentation map at original resolution
+            original_size = image.size[::-1] # (height, width)
+            ade_preds = self.oneformer_processor.post_process_semantic_segmentation(outputs, target_sizes=[original_size])[0]
+            
+            # Convert to our navigation classes and then to a colored image
+            nav_seg = self.oneformer_lookup_table[ade_preds.cpu().numpy()]
+            colored_mask = self.seg_colors[nav_seg]
+            
+            # Publish the result
+            seg_msg = self.bridge.cv2_to_imgmsg(cv2.cvtColor(colored_mask, cv2.COLOR_RGB2BGR), encoding="bgr8")
+            seg_msg.header.stamp = self.get_clock().now().to_msg()
+            self.oneformer_pub.publish(seg_msg)
 
     def _timer_cb(self):
         if len(self.context_queue) <= self.context_size:
@@ -554,6 +618,11 @@ class NavigationNode(Node):
             if isinstance(outputs, dict):
                 distances_np = to_numpy(outputs['dist_pred'])
                 waypoints_np = to_numpy(outputs['action_pred'])
+
+                if 'obs_seg_logits' in outputs and outputs['obs_seg_logits'] is not None:
+                    seg_logits = outputs['obs_seg_logits']
+                    self._publish_seg_viz(seg_logits)
+
             else: # Handle tuple output for older models
                 distances, waypoints = outputs
                 distances_np = to_numpy(distances)
@@ -627,6 +696,29 @@ class NavigationNode(Node):
             msg.header.stamp = self.get_clock().now().to_msg()
             pub.publish(msg)
 
+    def _publish_seg_viz(self, seg_logits: torch.Tensor):
+        """Converts segmentation logits to a colored image, resizes it, and publishes it."""
+        # Take the prediction for the first item in the batch
+        pred_mask = torch.argmax(seg_logits[0], dim=0).cpu().numpy().astype(np.uint8)
+        
+        # Map the class indices to colors
+        colored_mask = self.seg_colors[pred_mask]
+        
+        # Get the original camera image dimensions from the latest message in the queue
+        if self.context_queue:
+            latest_ros_img = self.context_queue[-1]
+            original_dims = (latest_ros_img.width, latest_ros_img.height)
+            
+            # Resize the colored mask to match the original camera image size
+            colored_mask = cv2.resize(colored_mask, original_dims, interpolation=cv2.INTER_NEAREST)
+
+        # Convert to BGR for OpenCV
+        colored_mask_bgr = cv2.cvtColor(colored_mask, cv2.COLOR_RGB2BGR)
+        
+        # Create and publish the ROS Image message
+        seg_msg = self.bridge.cv2_to_imgmsg(colored_mask_bgr, encoding="bgr8")
+        seg_msg.header.stamp = self.get_clock().now().to_msg()
+        self.seg_viz_pub.publish(seg_msg)
     # ------------------------------------------------------------------
     # Publish helpers
     # ------------------------------------------------------------------
