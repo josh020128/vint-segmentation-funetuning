@@ -8,7 +8,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import segmentation_models_pytorch as smp
-from typing import Dict
+from typing import Dict, Tuple
 from prettytable import PrettyTable
 
 # It's assumed you have a working ViNT implementation
@@ -61,135 +61,162 @@ def count_parameters(model):
     print(f"Total Trainable Params: {total_params/1e6:.2f}M")
     return total_params
 
-# my current code using lated fusion. Not good seg_loss
+class SpatialSegmentationEncoder(nn.Module):
+    """
+    Encodes a segmentation mask, preserving spatial information to identify
+    obstacle locations and producing a feature summary.
+    """
+    def __init__(self, num_classes: int, feature_dim: int):
+        super().__init__()
+        self.conv1 = nn.Sequential(
+            nn.Conv2d(num_classes, 32, kernel_size=7, stride=2, padding=3),
+            nn.BatchNorm2d(32), nn.ReLU()
+        )
+        self.conv2 = nn.Sequential(
+            nn.Conv2d(32, 64, kernel_size=5, stride=2, padding=2),
+            nn.BatchNorm2d(64), nn.ReLU()
+        )
+        self.conv3 = nn.Sequential(
+            nn.Conv2d(64, 128, kernel_size=3, stride=2, padding=1),
+            nn.BatchNorm2d(128), nn.ReLU()
+        )
+        
+        self.feature_extractor = nn.Sequential(
+            nn.AdaptiveAvgPool2d((1, 1)),
+            nn.Flatten(),
+            nn.Linear(128, feature_dim),
+            nn.LayerNorm(feature_dim),
+            nn.ReLU(),
+        )
+        
+    def forward(self, seg_masks: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        x = self.conv1(seg_masks)
+        x = self.conv2(x)
+        spatial_features = self.conv3(x) # Shape: (B, 128, H/8, W/8)
+        
+        # Create the feature summary vector
+        features = self.feature_extractor(spatial_features)
+        
+        return features, spatial_features
+
+class TrajectoryAdapter(nn.Module):
+    """
+    Generates corrective offsets for a trajectory based on spatial obstacle features.
+    """
+    def __init__(self, feature_dim: int, traj_len: int):
+        super().__init__()
+        # This network learns to generate small x,y nudges for each waypoint
+        self.trajectory_modulator = nn.Sequential(
+            nn.Linear(feature_dim, 256),
+            nn.ReLU(),
+            nn.Linear(256, traj_len * 2),  # x,y offsets for each waypoint
+            nn.Tanh() # Output values between -1 and 1
+        )
+        
+    def forward(self, vint_traj: torch.Tensor, seg_features: torch.Tensor) -> torch.Tensor:
+        B, T, _ = vint_traj.shape
+        
+        # Generate trajectory offsets based on the summary of the segmentation mask
+        offsets = self.trajectory_modulator(seg_features)
+        # Reshape and scale down the offsets to ensure they are small corrections
+        offsets = offsets.view(B, T, 2) * 0.2  # Limit max offset to 20% of normalized space
+        
+        # Apply the corrective nudge to the original trajectory
+        adapted_traj = vint_traj[:, :, :2] + offsets
+        
+        # Re-attach the angle information if it exists
+        if vint_traj.shape[-1] > 2:
+            adapted_traj = torch.cat([adapted_traj, vint_traj[:, :, 2:]], dim=-1)
+            
+        return adapted_traj
+
 class SegmentationViNT(nn.Module):
     """
-    ViNT enhanced with a semantic segmentation branch using late fusion for stability.
+    The main model that orchestrates the "driver" (ViNT) and "co-pilot" (segmentation) modules.
     """
     def __init__(
         self,
-        # ViNT-specific arguments
-        context_size: int,
-        len_traj_pred: int,
-        learn_angle: bool,
-        obs_encoder: str,
-        obs_encoding_size: int,
-        
-        # Segmentation-specific arguments
-        num_seg_classes: int,
-        seg_encoder: str = "resnet34",
-        freeze_vint: bool = True,
-        seg_feature_dim: int = 256,
-        **kwargs # Absorb any extra unused parameters
+        context_size: int, len_traj_pred: int, learn_angle: bool,
+        obs_encoder: str, obs_encoding_size: int, num_seg_classes: int,
+        seg_feature_dim: int = 256, freeze_vint: bool = True, **kwargs
     ):
         super().__init__()
-        
-        # Store key configuration parameters
         self.len_traj_pred = len_traj_pred
         self.learn_angle = learn_angle
-        self.num_seg_classes = num_seg_classes
         
-        # 1. Initialize the base ViNT model
-        # The full ViNT model will be used as a feature extractor
+        # 1. ViNT model (the "driver")
         vint_args = {
             'context_size': context_size, 'len_traj_pred': len_traj_pred,
             'learn_angle': learn_angle, 'obs_encoder': obs_encoder,
-            'obs_encoding_size': obs_encoding_size,
-            **kwargs
+            'obs_encoding_size': obs_encoding_size, **kwargs
         }
         self.vint_model = build_vint_model(**vint_args)
         
-        # Freeze the entire ViNT model if specified
         if freeze_vint:
-            print("Freezing all ViNT model parameters.")
+            print("Freezing ViNT model parameters for Stage 1.")
             for param in self.vint_model.parameters():
                 param.requires_grad = False
         
-        # 2. Initialize the Segmentation Branch
-        self.seg_model = smp.Unet(
-            encoder_name=seg_encoder,
-            encoder_weights="imagenet",
-            in_channels=3,
-            classes=num_seg_classes,
-            activation=None,
-        )
+        # 2. Segmentation processing modules (the "co-pilot")
+        self.seg_encoder = SpatialSegmentationEncoder(num_seg_classes, seg_feature_dim)
+        self.trajectory_adapter = TrajectoryAdapter(seg_feature_dim, len_traj_pred)
         
-        # 3. Initialize a Segmentation Feature Extractor
-        # This module processes segmentation logits into a 1D feature vector
-        self.seg_feature_extractor = nn.Sequential(
-            nn.Conv2d(num_seg_classes, seg_feature_dim, kernel_size=3, padding=1),
-            nn.BatchNorm2d(seg_feature_dim),
-            nn.ReLU(inplace=True),
-            nn.AdaptiveAvgPool2d((7, 7)),
-            nn.Flatten(),
-            nn.Linear(seg_feature_dim * 49, obs_encoding_size),
-            nn.ReLU(inplace=True),
-            nn.Dropout(0.1),
-        )
-        # 4. Initialize NEW Prediction Heads for the fused features
-        # The input dimension is doubled because we concatenate the two feature vectors
-        fused_dim = obs_encoding_size * 2
-        num_action_outputs = len_traj_pred * (3 if learn_angle else 2)
+        # 3. Learnable parameter to control the influence of the co-pilot's corrections
+        self.seg_influence_logit = nn.Parameter(torch.tensor(-1.38)) # sigmoid(-1.38) is approx 0.2
         
-        self.action_predictor = nn.Sequential(
-            nn.Linear(fused_dim, 512),
-            nn.ReLU(),
-            nn.Linear(512, num_action_outputs),
-        )
-        
-        # The distance predictor takes the fused observation and the goal
-        dist_predictor_input_dim = fused_dim + obs_encoding_size
+        # 4. Prediction heads
+        # The distance predictor now uses both RGB and segmentation features for a more informed estimate.
+        fused_dim = obs_encoding_size + seg_feature_dim
         self.dist_predictor = nn.Sequential(
-            nn.Linear(dist_predictor_input_dim, 512),
-            nn.ReLU(),
-            nn.Linear(512, 1),
+            nn.Linear(fused_dim + obs_encoding_size, 256), # Fused Obs + Goal
+            nn.LayerNorm(256), nn.ReLU(), nn.Dropout(0.1),
+            nn.Linear(256, 1)
         )
+        
+        print("Initialized SegmentationViNT (Co-Pilot Architecture)")
+        count_parameters(self)
     
     def unfreeze_vint(self):
-        """Unfreeze all ViNT parameters for Stage 2 finetuning."""
-        print("Unfreezing ViNT model parameters...")
+        print("Unfreezing ViNT model for Stage 2...")
         for param in self.vint_model.parameters():
             param.requires_grad = True
-    
-    def forward(self, obs_images: torch.Tensor, goal_images: torch.Tensor) -> Dict[str, torch.Tensor]:
-        batch_size = obs_images.shape[0]
+            
+    def forward(self, 
+                obs_images: torch.Tensor,
+                goal_images: torch.Tensor,
+                obs_seg_masks: torch.Tensor) -> Dict[str, torch.Tensor]:
         
-        # --- Branch 1: Get ViNT Features ---
-        # We get the final 1D feature vectors from the pre-trained model
-        with torch.set_grad_enabled(next(self.vint_model.parameters()).requires_grad):
-            obs_encoding = self.vint_model.compress_obs_enc(self.vint_model.obs_encoder(obs_images))
-            goal_encoding = self.vint_model.compress_goal_enc(self.vint_model.goal_encoder(goal_images))
+        # 1. Get ViNT's primary plan and features from the RGB input
+        vint_outputs = self.vint_model(obs_images, goal_images)
+        vint_trajectory = vint_outputs['action_pred']
+        
+        # Gradients are controlled by the `freeze_vint` flag, so this block is safe.
+        obs_encoding = self.vint_model.compress_obs_enc(self.vint_model.obs_encoder(obs_images))
+        goal_encoding = self.vint_model.compress_goal_enc(self.vint_model.goal_encoder(goal_images))
+        
+        # <<< NAN LOSS FIX: Normalize all feature vectors and apply a scaling factor >>>
+        obs_encoding = F.normalize(obs_encoding, p=2, dim=-1) * 10
+        goal_encoding = F.normalize(goal_encoding, p=2, dim=-1) * 10
 
-            # ADDED CODE 1
-            # Normalize for stability
-            obs_encoding = F.normalize(obs_encoding, p=2, dim=-1) * 10
-            goal_encoding = F.normalize(goal_encoding, p=2, dim=-1) * 10
+        # 2. Process segmentation mask to get safety information
+        seg_features, spatial_features = self.seg_encoder(obs_seg_masks)
+        seg_features = F.normalize(seg_features, p=2, dim=-1) * 10
         
-        # --- Branch 2: Get Segmentation Features ---
-        last_obs_frame = obs_images[:, -3:, :, :]
-
-        obs_seg_logits = self.seg_model(last_obs_frame)
-
-        seg_probs = F.softmax(obs_seg_logits, dim=1).detach()
-        seg_features_obs = self.seg_feature_extractor(seg_probs)
-        seg_features_obs = F.normalize(seg_features_obs, p=2, dim=-1) * 10
+        # 3. The "co-pilot" adapts the trajectory based on obstacles
+        adapted_trajectory = self.trajectory_adapter(vint_trajectory.detach(), seg_features)
         
-        # --- Late Fusion Step ---
-        # Concatenate the final 1D feature vectors from both branches
-        fused_obs_features = torch.cat([obs_encoding, seg_features_obs], dim=1)
+        # 4. Blend the original and adapted trajectories with a learned, limited influence
+        seg_influence = torch.sigmoid(self.seg_influence_logit)
+        final_trajectory = torch.lerp(vint_trajectory, adapted_trajectory, seg_influence)
         
-        # --- Final Prediction ---
-        # The new prediction heads take the fused observation features and the original goal features
+        # 5. Predict distance using features from both RGB and segmentation
+        fused_obs_features = torch.cat([obs_encoding, seg_features], dim=1)
+        combined_for_dist = torch.cat([fused_obs_features, goal_encoding], dim=1)
+        dist_pred = self.dist_predictor(combined_for_dist)
         
-        # For simplicity, we assume the action predictor takes the fused observation
-        # and the distance predictor takes the combined features.
-        pred_actions = self.action_predictor(fused_obs_features)
-        
-        combined_features = torch.cat([fused_obs_features, goal_encoding], dim=1)
-        pred_dist = self.dist_predictor(combined_features)
-
         return {
-            'dist_pred': pred_dist,
-            'action_pred': pred_actions.view(batch_size, self.len_traj_pred, -1),
-            'obs_seg_logits': obs_seg_logits,
+            'action_pred': final_trajectory,
+            'dist_pred': dist_pred,
+            'vint_trajectory': vint_trajectory.detach(), # For consistency loss
+            'seg_influence': seg_influence.item(),
         }

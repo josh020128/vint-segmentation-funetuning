@@ -1,82 +1,70 @@
 # Segmentation ViNT Configuration
 project_name: "segmentation_vint"
 run_name: "seg_vint_fuse_scand"
-use_wandb: true
+use_wandb: false
 
-model_type: "segmentation_vint"
+seed: 42  # For reproducibility
 
 # ==================================================================
 # Model Parameters
 # ==================================================================
+model_type: "segmentation_vint"
 obs_encoder: "resnet34"
 obs_encoding_size: 512
 context_size: 5
 len_traj_pred: 8
 learn_angle: false
-late_fusion: true
-mha_num_attention_heads: 8
-mha_num_attention_layers: 4
-mha_ff_dim_factor: 4
 
-vint_feature_channels: 512
-
-# ==================================================================
-# Segmentation Specific
-# ==================================================================
+# --- Co-Pilot Specific ---
 num_seg_classes: 5  # SCAND: floor, wall, door, furniture, unknown
 seg_model_name: "scand"  # Must match dataset class mapping
-seg_model_type: "unet"
-seg_encoder: "resnet34"
-fusion_type: "gated"  # or "simple" for baseline
-use_semantic_goals: true
+seg_feature_dim: 256 # Dimensionality of the feature from the seg_encoder
 
-# CRITICAL for heuristics:
-use_pseudo_labels: false
-# pseudo_label_model: null  # NULL means use heuristics, not pretrained model
+# --- Pass-through arguments for the core ViNT model's decoder ---
+model_params:
+  mha_num_attention_heads: 8
+  mha_num_attention_layers: 4
+  mha_ff_dim_factor: 4
 
 # ==================================================================
 # Training Parameters
 # ==================================================================
-epochs: 60
+epochs: 50 # Total training epochs
 lr: 5e-5
 
-# FuSe schedule epochs
-stage1_epochs: 20 # Frozen ViNT
-stage2_epochs: 40  # Unfrozen ViNT with lower LR
-# Stage 3 uses remaining epochs (80 - 30 - 40 = 10)
+# Two-stage training schedule
+stage1_epochs: 25 # Stage 1: Train co-pilot modules with ViNT frozen
+stage2_epochs: 25 # Stage 2: Fine-tune the entire model
 
-batch_size: 16
+batch_size: 8
 eval_batch_size: 64
 gradient_accumulation_steps: 2
 
 # Optimizer settings
 optimizer: "adamw"
 scheduler: "cosine"
-warmup: false
-warmup_epochs: 0
-
-# Gradient clipping
-clipping: true  # ADD THIS
-max_norm: 1.0  # ADD THIS
 
 # ==================================================================
-# Loss Parameters
+# Loss Parameters (for CoPilotNavigationLoss)
 # ==================================================================
-# These are used if uncertainty weighting is disabled
-action_loss_weight: 1.5
-dist_loss_weight: 0.1
-seg_loss_weight: 0.3
+action_loss_weight: 1.0
+dist_loss_weight: 0.5
+# <<< ADDED: Crucial parameter for the co-pilot model >>>
+consistency_weight: 0.2
+
+# ==================================================================
+# Metric Parameters (for NavigationMetrics)
+# ==================================================================
+success_threshold: 0.3 # Max distance from goal (in normalized coords) to be a success
+collision_margin: 5    # Pixel radius around a trajectory point to check for obstacles
 
 # ==================================================================
 # Data Parameters
 # ==================================================================
 image_size: [128, 160]
-normalize: true
-goal_type: "image"
 num_workers: 8
-eval_fraction: 0.25
 
-# Distance parameters
+# Distance & Action sampling parameters
 distance:
   min_dist_cat: 0
   max_dist_cat: 20
@@ -89,30 +77,21 @@ action:
 # ==================================================================
 datasets:
   scand:
-    data_folder: "/home/airlab/vint_fuse3/datasets/scand_processed"
-    seg_data_folder: "/home/airlab/vint_fuse3/datasets/scand_seg"
-    train: "/home/airlab/vint_fuse3/train/vint_train/data/data_splits/scand/train"
-    test: "/home/airlab/vint_fuse3/train/vint_train/data/data_splits/scand/test"
+    data_folder: "/home/airlab/seg_test4/vint-segmentation-funetuning/datasets/scand_processed"
+    # This folder of pre-computed masks is mandatory for this model
+    seg_data_folder: "/home/airlab/seg_test4/vint-segmentation-funetuning/datasets/scand_seg"
+    train: "/home/airlab/seg_test4/vint-segmentation-funetuning/train/vint_train/data/data_splits/scand/train"
+    test: "/home/airlab/seg_test4/vint-segmentation-funetuning/train/vint_train/data/data_splits/scand/test"
     waypoint_spacing: 1
     negative_mining: true
-    goals_per_obs: 1
-    end_slack: 0
 
 # ==================================================================
 # Pretrained Model
 # ==================================================================
-pretrained_vint_path: "/home/airlab/vint_fuse3/deployment/model_weights/vint_original.pth"
+pretrained_vint_path: "/home/airlab/seg_test4/vint-segmentation-funetuning/deployment/model_weights/vint_original.pth"
 
 # ==================================================================
 # Logging
 # ==================================================================
 print_log_freq: 50
-image_log_freq: 500
-num_images_log: 8 
-visualization_freq: 10
-
-# ==================================================================
-# Project Settings (ADD THIS SECTION)
-# ==================================================================
-project_folder: null  # Will be set automatically by train script
-seed: 42  # For reproducibility
+eval_freq: 5 # Evaluate and visualize every 5 epochs

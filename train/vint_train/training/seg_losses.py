@@ -1,113 +1,87 @@
 # FILE: vint_train/training/seg_losses.py
 
 """
-Loss functions for segmentation-enhanced navigation
+Loss function for the dual-input ViNT model with a "safety co-pilot" architecture.
 """
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from typing import Dict, Optional
 
-class FocalLoss(nn.Module):
-    """Focal loss that correctly handles an ignore_index."""
-    def __init__(self, alpha: float = 0.25, gamma: float = 2.0, ignore_index: int = 255):
-        super().__init__()
-        self.alpha = alpha
-        self.gamma = gamma
-        self.ignore_index = ignore_index
-
-    def forward(self, inputs: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
-        ce_loss = F.cross_entropy(inputs, targets, reduction='none', ignore_index=self.ignore_index)
-        pt = torch.exp(-ce_loss)
-        focal_loss = self.alpha * (1 - pt)**self.gamma * ce_loss
-        
-        mask = (targets != self.ignore_index)
-        return focal_loss[mask].mean()
-
-class SegmentationNavigationLoss(nn.Module):
+class CoPilotNavigationLoss(nn.Module):
     """
-    Combines navigation and segmentation losses with optional uncertainty weighting.
+    Calculates the loss for the co-pilot model, balancing navigation accuracy
+    with consistency to the primary ViNT planner.
     """
     def __init__(
         self,
         action_loss_weight: float = 1.0,
         dist_loss_weight: float = 0.5,
-        seg_loss_weight: float = 0.3,
-        use_focal_loss: bool = True,
-        use_uncertainty_weighting: bool = True,
+        consistency_weight: float = 0.2, # Weight for the new consistency term
     ):
+        """
+        Initializes the loss module.
+
+        Args:
+            action_loss_weight (float): Weight for the final trajectory's MSE loss.
+            dist_loss_weight (float): Weight for the distance-to-goal MSE loss.
+            consistency_weight (float): Weight to encourage the final trajectory
+                                        to stay close to the ViNT's original plan.
+        """
         super().__init__()
-        self.use_uncertainty_weighting = use_uncertainty_weighting
-        
         self.action_loss_weight = action_loss_weight
         self.dist_loss_weight = dist_loss_weight
-        self.seg_loss_weight = seg_loss_weight
+        self.consistency_weight = consistency_weight
         
-        self.action_loss_fn = nn.MSELoss(reduction='none')
+        # Use standard Mean Squared Error for the losses
+        self.action_loss_fn = nn.MSELoss()
         self.dist_loss_fn = nn.MSELoss()
-        
-        if use_focal_loss:
-            self.seg_loss_fn = FocalLoss()
-        else:
-            self.seg_loss_fn = nn.CrossEntropyLoss(ignore_index=255)
-        
-        if use_uncertainty_weighting:
-            self.log_action_var = nn.Parameter(torch.zeros(1))
-            self.log_dist_var = nn.Parameter(torch.zeros(1))
-            self.log_seg_var = nn.Parameter(torch.zeros(1))
+        self.consistency_loss_fn = nn.MSELoss()
 
     def forward(
         self,
-        pred_actions: torch.Tensor,
-        true_actions: torch.Tensor,
-        pred_dist: torch.Tensor,
-        true_dist: torch.Tensor,
-        pred_seg: torch.Tensor,
-        true_seg: torch.Tensor,
+        outputs: Dict[str, torch.Tensor],
+        targets: Dict[str, torch.Tensor],
         action_mask: Optional[torch.Tensor] = None,
     ) -> Dict[str, torch.Tensor]:
-        
-        # Action loss (masked for invalid samples)
-        action_loss_per_element = self.action_loss_fn(pred_actions, true_actions).mean(dim=-1)
-        if action_mask is not None:
-            action_mask = action_mask.unsqueeze(1)
-            action_loss = (action_loss_per_element * action_mask).sum() / (action_mask.sum() + 1e-8)
-        else:
-            action_loss = action_loss_per_element.mean()
-        
-        # Distance loss
-        dist_loss = self.dist_loss_fn(pred_dist, true_dist)
-        
-        # Segmentation loss
-        seg_loss = torch.tensor(0.0, device=pred_actions.device)
-        if true_seg is not None and pred_seg is not None:
-            if torch.any(true_seg != 255): 
-                seg_loss = self.seg_loss_fn(pred_seg, true_seg)
-        
-        # Combine losses
-        if self.use_uncertainty_weighting:
-            # <<< FIXED: Ensure learnable parameters are on the same device as the inputs >>>
-            device = pred_actions.device
-            log_action_var = self.log_action_var.to(device)
-            log_dist_var = self.log_dist_var.to(device)
-            log_seg_var = self.log_seg_var.to(device)
+        """
+        Computes the combined navigation and consistency loss.
 
-            action_precision = torch.exp(-log_action_var)
-            dist_precision = torch.exp(-log_dist_var)
-            seg_precision = torch.exp(-log_seg_var)
-            
-            total_loss = (action_precision * action_loss + log_action_var) + \
-                         (dist_precision * dist_loss + log_dist_var) + \
-                         (seg_precision * seg_loss + log_seg_var)
-            total_loss /= 3.0
-        else:
-            total_loss = (self.action_loss_weight * action_loss) + \
-                         (self.dist_loss_weight * dist_loss) + \
-                         (self.seg_loss_weight * seg_loss)
+        Args:
+            outputs (Dict[str, torch.Tensor]): Predictions from the model, must include
+                                               'action_pred', 'dist_pred', and 'vint_trajectory'.
+            targets (Dict[str, torch.Tensor]): Ground truth labels, must include
+                                               'actions' and 'distance'.
+            action_mask (Optional[torch.Tensor]): A mask to exclude invalid actions.
+
+        Returns:
+            Dict[str, torch.Tensor]: A dictionary of all computed loss components.
+        """
+        
+        # --- 1. Action Loss ---
+        # Compares the FINAL trajectory to the ground truth
+        action_loss = self.action_loss_fn(outputs['action_pred'], targets['actions'])
+        
+        # --- 2. Distance Loss ---
+        dist_loss = self.dist_loss_fn(outputs['dist_pred'].squeeze(), targets['distance'].float())
+
+        # --- 3. Consistency Loss (CRITICAL for Co-Pilot Model) ---
+        # Compares the final trajectory to the ViNT's ORIGINAL plan.
+        # This prevents the safety module from overpowering the main planner.
+        consistency_loss = self.consistency_loss_fn(outputs['action_pred'], outputs['vint_trajectory'])
+        
+        # --- 4. Combine All Losses ---
+        total_loss = (self.action_loss_weight * action_loss) + \
+                     (self.dist_loss_weight * dist_loss) + \
+                     (self.consistency_weight * consistency_loss)
+        
+        # Apply action mask if provided (useful for filtering out certain samples)
+        if action_mask is not None:
+            total_loss = (total_loss * action_mask).sum() / (action_mask.sum() + 1e-8)
         
         return {
             'total_loss': total_loss,
             'action_loss': action_loss.detach(),
             'dist_loss': dist_loss.detach(),
-            'seg_loss': seg_loss.detach(),
+            'consistency_loss': consistency_loss.detach(),
         }

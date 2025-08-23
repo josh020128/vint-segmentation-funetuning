@@ -1,6 +1,10 @@
 vint:
-  config_path: "/home/airlab/vint_fuse3/train/config/vint.yaml"
-  ckpt_path: "/home/airlab/vint_fuse3/deployment/model_weights/vint_original.pth"
+  config_path: "/home/airlab/seg_test4/vint-segmentation-funetuning/train/config/segmentation_vint.yaml"
+  ckpt_path: "/home/airlab/seg_test4/vint-segmentation-funetuning/deployment/model_weights/best.pth"
+
+segmentation_vint:
+  config_path: "/home/airlab/seg_test4/vint-segmentation-funetuning/train/config/segmentation_vint.yaml"
+  ckpt_path: "/home/airlab/seg_test4/vint-segmentation-funetuning/deployment/model_weights/best.pth"
 
 late_fusion:
   config_path: "../../train/config/late_fusion.yaml"

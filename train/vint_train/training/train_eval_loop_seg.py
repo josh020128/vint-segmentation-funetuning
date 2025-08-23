@@ -1,40 +1,46 @@
 # FILE: vint_train/training/train_eval_loop_seg.py
 
 """
-Training and evaluation loop for the late-fusion SegmentationViNT.
+Training and evaluation loop for the dual-input ViNT model with a 
+"safety co-pilot" architecture.
 """
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torch.cuda.amp import autocast, GradScaler
 import wandb
 from typing import Dict
 import os
-import numpy as np
 import shutil
+from tqdm import tqdm
+import numpy as np
 
 # --- Main project imports ---
-from vint_train.training.seg_losses import SegmentationNavigationLoss
+from vint_train.training.seg_losses import CoPilotNavigationLoss
 from vint_train.training.seg_metrics import evaluate_segmentation_vint
 from vint_train.visualizing.visualize_segmentation import visualize_segmentation_predictions
 
 # --- Helper Functions ---
 
 def get_model_module(model: nn.Module) -> nn.Module:
-    """Get the actual model module (handles DataParallel wrapper)."""
+    """Gets the actual model module, handling nn.DataParallel wrappers."""
     return model.module if hasattr(model, 'module') else model
 
 def save_checkpoint(model, optimizer, scheduler, epoch, project_folder, is_best=False):
-    """Saves latest and best model checkpoints."""
+    """Saves the latest and (optionally) the best model checkpoints."""
     if not os.path.exists(project_folder):
         os.makedirs(project_folder)
-    model_state = get_model_module(model).state_dict()
+    
     checkpoint = {
-        'epoch': epoch, 'model_state_dict': model_state,
+        'epoch': epoch,
+        'model_state_dict': get_model_module(model).state_dict(),
         'optimizer_state_dict': optimizer.state_dict(),
         'scheduler_state_dict': scheduler.state_dict() if scheduler else None,
     }
+    
     latest_path = os.path.join(project_folder, 'latest.pth')
     torch.save(checkpoint, latest_path)
+    
     if is_best:
         best_path = os.path.join(project_folder, 'best.pth')
         shutil.copyfile(latest_path, best_path)
@@ -44,31 +50,38 @@ def to_numpy(tensor: torch.Tensor) -> np.ndarray:
     """Helper to convert a tensor to a numpy array."""
     return tensor.detach().cpu().numpy()
 
-def visualize_batch(model, batch, device, epoch, stage, project_folder, use_wandb=True):
-    """Generates and logs a visualization for a batch of data."""
-    model.eval() # Set to eval mode for consistent predictions
+def visualize_batch(model, batch, device, epoch, config, project_folder, stage):
+    """Generates and logs a visualization for a batch of validation data."""
+    model.eval()
+    
+    # Prepare data and move to device
+    obs_images = batch['obs_images'].to(device)
+    goal_images = batch['goal_images'].to(device)
+    obs_seg_mask_one_hot = batch['obs_seg_mask'].to(device)
+    
     with torch.no_grad():
-        obs_images = batch['obs_images'][:8].to(device)
-        goal_images = batch['goal_images'][:8].to(device)
-        
-        outputs = model(obs_images, goal_images)
-        
-        visualize_segmentation_predictions(
-            batch_obs_images=to_numpy(obs_images),
-            batch_goal_images=to_numpy(goal_images),
-            batch_seg_preds=to_numpy(outputs['obs_seg_logits']),
-            batch_seg_labels=to_numpy(batch.get('obs_seg_mask', torch.zeros_like(outputs['obs_seg_logits']))[:8]),
-            batch_pred_waypoints=to_numpy(outputs['action_pred']),
-            batch_label_waypoints=to_numpy(batch['actions'][:8]),
-            batch_goals=to_numpy(batch.get('goal_pos', torch.zeros(8, 2))[:8]),
-            save_folder=project_folder,
-            epoch=epoch,
-            eval_type=f"stage_{stage}",
-            use_wandb=use_wandb,
-        )
-    model.train() # Set back to train mode
+        outputs = model(obs_images, goal_images, obs_seg_mask_one_hot)
 
-# --- Main Training Loop ---
+    # Convert one-hot mask back to class indices for visualization
+    seg_mask_labels = torch.argmax(obs_seg_mask_one_hot, dim=1)
+
+    # Call the main visualization function
+    visualize_segmentation_predictions(
+        batch_obs_images=to_numpy(obs_images),
+        batch_goal_images=to_numpy(goal_images),
+        batch_seg_preds=to_numpy(seg_mask_labels), # Use the input mask as the "prediction"
+        batch_seg_labels=to_numpy(seg_mask_labels),
+        batch_pred_waypoints=to_numpy(outputs['action_pred']),
+        batch_label_waypoints=to_numpy(batch['actions']),
+        batch_goals=to_numpy(batch.get('goal_pos', torch.zeros(obs_images.shape[0], 2))),
+        save_folder=project_folder,
+        epoch=epoch,
+        eval_type=f"stage_{stage}_eval",
+        use_wandb=config.get("use_wandb", True),
+    )
+    model.train() # Set model back to training mode
+
+# --- Main Training & Evaluation Loop ---
 
 def train_eval_loop_segmentation(
     model: nn.Module,
@@ -80,26 +93,31 @@ def train_eval_loop_segmentation(
     config: Dict,
     start_stage: int = 1,
 ):
-    """3-stage FuSe training for the late-fusion SegmentationViNT."""
+    """Two-stage training loop for the co-pilot ViNT model."""
     total_epochs_trained = 0
     model_module = get_model_module(model)
     
     lr_config = config["lr_schedule"]
-    stage1_epochs = config.get("stage1_epochs", 20)
-    stage2_epochs = config.get("stage2_epochs", 40)
+    stage1_epochs = config.get("stage1_epochs", 25)
     
-    loss_fn = SegmentationNavigationLoss(use_uncertainty_weighting=True)
+    # <<< MODIFIED: Use the correct loss function for the co-pilot model >>>
+    loss_fn = CoPilotNavigationLoss(
+        action_loss_weight=config.get("action_loss_weight", 1.0),
+        dist_loss_weight=config.get("dist_loss_weight", 0.5),
+        consistency_weight=config.get("consistency_weight", 0.2)
+    )
     scaler = GradScaler() if device.type == 'cuda' else None
-    
     best_val_score = float('inf')
 
-    # --- STAGE 1: Train new layers only ---
+    # --- STAGE 1: Train co-pilot modules with ViNT frozen ---
     if start_stage <= 1:
-        print(f"\n{'='*60}\nSTAGE 1: Training New Modules (ViNT Frozen)\n{'='*60}")
-        trainable_params = list(model_module.seg_model.parameters()) + \
-                           list(model_module.seg_feature_extractor.parameters()) + \
-                           list(model_module.action_predictor.parameters()) + \
+        print(f"\n{'='*60}\nSTAGE 1: Training Co-Pilot Modules (ViNT Frozen)\n{'='*60}")
+        
+        # <<< MODIFIED: Train the seg_encoder, trajectory_adapter, and dist_predictor >>>
+        trainable_params = list(model_module.seg_encoder.parameters()) + \
+                           list(model_module.trajectory_adapter.parameters()) + \
                            list(model_module.dist_predictor.parameters())
+        
         stage1_optimizer = torch.optim.AdamW(trainable_params, lr=lr_config["stage1"])
         stage1_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(stage1_optimizer, T_max=stage1_epochs)
         
@@ -107,177 +125,148 @@ def train_eval_loop_segmentation(
             print(f"\n--- Stage 1, Epoch {epoch+1}/{stage1_epochs} ---")
             train_epoch(model, dataloader, stage1_optimizer, loss_fn, device, scaler, config, total_epochs_trained)
             stage1_scheduler.step()
-            if (epoch + 1) % 5 == 0:
-                evaluate_and_log(model, test_dataloaders, device, total_epochs_trained, config, stage=1)
-                visualize_batch(model, next(iter(dataloader)), device, total_epochs_trained, 1, project_folder)
+            
+            if (epoch + 1) % config.get("eval_freq", 5) == 0:
+                val_metrics = evaluate_and_log(model, test_dataloaders, device, total_epochs_trained, config, stage=1)
+
+                vis_loader = next(iter(test_dataloaders.values()))
+                vis_batch = next(iter(vis_loader))
+                visualize_batch(model, vis_batch, device, total_epochs_trained, config, project_folder, stage=1)
+
+                val_score = val_metrics.get('val_score', float('inf'))
+                is_best = val_score < best_val_score
+                if is_best: best_val_score = val_score
+                save_checkpoint(model, stage1_optimizer, stage1_scheduler, total_epochs_trained, project_folder, is_best=is_best)
+
             total_epochs_trained += 1
+        
         save_checkpoint(model, stage1_optimizer, stage1_scheduler, total_epochs_trained, project_folder)
 
-    # --- STAGE 2: Unfreeze and train with different LRs ---
-    if start_stage <= 2:
-        print(f"\n{'='*60}\nSTAGE 2: Unfreezing ViNT (Discriminative LRs)\n{'='*60}")
+    # --- STAGE 2: Fine-tune the entire model with discriminative learning rates ---
+    remaining_epochs = epochs - total_epochs_trained
+    if start_stage <= 2 and remaining_epochs > 0:
+        print(f"\n{'='*60}\nSTAGE 2: Fine-tuning Full Model (Discriminative LRs)\n{'='*60}")
         model_module.unfreeze_vint()
         
+        # <<< MODIFIED: Correctly group parameters for the co-pilot model >>>
         param_groups = [
-            {'params': list(model_module.seg_model.parameters()) + 
-                       list(model_module.seg_feature_extractor.parameters()) + 
-                       list(model_module.action_predictor.parameters()) + 
-                       list(model_module.dist_predictor.parameters()), 
-             'lr': lr_config["stage2_new_modules"]},
-            {'params': model_module.vint_model.parameters(), 'lr': lr_config["stage2_vint_backbone"]}
+            {
+                'params': list(model_module.seg_encoder.parameters()) + 
+                          list(model_module.trajectory_adapter.parameters()) + 
+                          list(model_module.dist_predictor.parameters()), 
+                'lr': lr_config["stage2_new_modules"]
+            },
+            {
+                'params': model_module.vint_model.parameters(), 
+                'lr': lr_config["stage2_vint_backbone"]
+            }
         ]
-        stage2_optimizer = torch.optim.AdamW(param_groups)
-        stage2_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(stage2_optimizer, T_max=stage2_epochs)
         
-        for epoch in range(stage2_epochs):
-            print(f"\n--- Stage 2, Epoch {epoch+1}/{stage2_epochs} ---")
-            train_epoch(model, dataloader, stage2_optimizer, loss_fn, device, scaler, config, total_epochs_trained)
-            stage2_scheduler.step()
-            if (epoch + 1) % 5 == 0:
-                evaluate_and_log(model, test_dataloaders, device, total_epochs_trained, config, stage=2)
-                visualize_batch(model, next(iter(dataloader)), device, total_epochs_trained, 2, project_folder)
-            total_epochs_trained += 1
-        save_checkpoint(model, stage2_optimizer, stage2_scheduler, total_epochs_trained, project_folder, True)
-
-    # --- STAGE 3: Fine-tune everything ---
-    """remaining_epochs = epochs - total_epochs_trained
-    if start_stage <= 3 and remaining_epochs > 0:
-        print(f"\n{'='*60}\nSTAGE 3: Full Fine-tuning\n{'='*60}")
-        stage3_optimizer = torch.optim.AdamW(model.parameters(), lr=lr_config["stage3"])
-        stage3_scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(stage3_optimizer, mode='min', factor=0.5, patience=5, verbose=True)
-        best_val_score = float('inf')
+        stage2_optimizer = torch.optim.AdamW(param_groups)
+        stage2_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(stage2_optimizer, T_max=remaining_epochs)
         
         for epoch in range(remaining_epochs):
-            print(f"\n--- Stage 3, Epoch {epoch+1}/{remaining_epochs} ---")
-            train_epoch(model, dataloader, stage3_optimizer, loss_fn, device, scaler, config, total_epochs_trained)
+            print(f"\n--- Stage 2, Epoch {epoch+1}/{remaining_epochs} ---")
+            train_epoch(model, dataloader, stage2_optimizer, loss_fn, device, scaler, config, total_epochs_trained)
+            stage2_scheduler.step()
             
-            val_metrics = evaluate_and_log(model, test_dataloaders, device, total_epochs_trained, config, stage=3)
-            val_loader = next(iter(test_dataloaders.values()))
-            visualize_batch(model, next(iter(val_loader)), device, total_epochs_trained, 3, project_folder)
+            if (epoch + 1) % config.get("eval_freq", 5) == 0:
+                val_metrics = evaluate_and_log(model, test_dataloaders, device, total_epochs_trained, config, stage=2)
+                
+                vis_loader = next(iter(test_dataloaders.values()))
+                vis_batch = next(iter(vis_loader))
+                visualize_batch(model, vis_batch, device, total_epochs_trained, config, project_folder, stage=2)
+                
+                val_score = val_metrics.get('val_score', float('inf'))
+                is_best = val_score < best_val_score
+                if is_best: best_val_score = val_score
+                save_checkpoint(model, stage2_optimizer, stage2_scheduler, total_epochs_trained, project_folder, is_best=is_best)
             
-            val_score = val_metrics.get('val_score', float('inf'))
-            stage3_scheduler.step(val_score)
-            
-            is_best = val_score < best_val_score
-            if is_best: best_val_score = val_score
-            
-            save_checkpoint(model, stage3_optimizer, stage3_scheduler, total_epochs_trained, project_folder, is_best=is_best)
-            total_epochs_trained += 1"""
+            total_epochs_trained += 1
 
-    print(f"\n{'='*60}\n Training Complete! Best validation score: {best_val_score:.4f}\n{'='*60}")
+    print(f"\n{'='*60}\nTraining Complete! Best validation score: {best_val_score:.4f}\n{'='*60}")
 
-# <<< FIXED: Replaced placeholder with the full, robust training function >>>
 def train_epoch(model, dataloader, optimizer, loss_fn, device, scaler, config, epoch):
-    """Helper function to train for one epoch with enhanced stability checks."""
+    """Runs a single training epoch for the co-pilot model."""
     model.train()
     grad_accum = config.get("gradient_accumulation_steps", 1)
     log_freq = config.get("print_log_freq", 100)
     use_wandb = config.get("use_wandb", True)
 
-    for batch_idx, batch in enumerate(dataloader):
-        # --- Data loading and moving to device ---
+    for batch_idx, batch in enumerate(tqdm(dataloader, desc=f"Epoch {epoch} Training")):
         obs_images = batch['obs_images'].to(device)
         goal_images = batch['goal_images'].to(device)
-        true_actions = batch['actions'].to(device)
-        true_distance = batch['distance'].to(device)
-        true_seg = batch.get('obs_seg_mask', None)
-        if true_seg is not None: true_seg = true_seg.to(device)
-        action_mask = batch.get('action_mask', None)
-        if action_mask is not None: action_mask = action_mask.to(device)
+        obs_seg_masks = batch['obs_seg_mask'].to(device)
         
-        if batch_idx == 0:
-            if true_seg is not None and true_seg.sum() > 0:
-                print("✅ Using pre-labeled segmentation mask for training.")
-            else:
-                print("⚠️ Warning: No pre-labeled segmentation mask found. Using fallback/heuristic.")
+        targets = {
+            'actions': batch['actions'].to(device),
+            'distance': batch['distance'].to(device)
+        }
+        action_mask = batch.get('action_mask', None)
+        if action_mask is not None:
+            action_mask = action_mask.to(device)
 
-
-        # --- Forward pass with mixed precision ---
         with autocast(enabled=(scaler is not None)):
-            outputs = model(obs_images, goal_images)
+            outputs = model(obs_images, goal_images, obs_seg_masks)
+            
+            # <<< MODIFIED: Call the new loss function with the correct arguments >>>
             losses = loss_fn(
-                pred_actions=outputs['action_pred'], true_actions=true_actions,
-                pred_dist=outputs['dist_pred'].squeeze(), true_dist=true_distance.float(),
-                pred_seg=outputs['obs_seg_logits'], true_seg=true_seg,
-                action_mask=action_mask,
+                outputs=outputs, 
+                targets=targets,
+                action_mask=action_mask
             )
         
         loss = losses['total_loss']
         
-        # SAFETY CHECK 1: Skip batch if loss is NaN or infinite
         if not torch.isfinite(loss):
-            print(f" Warning: Skipping batch {batch_idx} due to invalid loss: {loss.item()}")
+            print(f"Warning: Skipping batch {batch_idx} due to invalid loss: {loss.item()}")
             optimizer.zero_grad()
             continue
 
-        # --- Backward pass ---
         loss_scaled = loss / grad_accum
         if scaler:
             scaler.scale(loss_scaled).backward()
         else:
             loss_scaled.backward()
 
-        # --- Optimizer step with gradient accumulation ---
         if (batch_idx + 1) % grad_accum == 0:
             if scaler:
-                # <<< FIXED: This is the correct and safe way to use GradScaler >>>
-                # Unscale the gradients before clipping
                 scaler.unscale_(optimizer)
-                # Clip the now-unscaled gradients
                 torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-                # scaler.step() will check for NaNs/infs and skip the update if they are present
                 scaler.step(optimizer)
-                # Update the scale for the next iteration
                 scaler.update()
             else:
                 torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
                 optimizer.step()
             
             optimizer.zero_grad(set_to_none=True)
-            
-            # Logging
-            if batch_idx % log_freq == 0 and use_wandb:
-                wandb.log({'train/total_loss': loss.item(), 'epoch': epoch})
-        # Logging
-        if batch_idx % log_freq == 0:
-            # <<< EDITED: Moved print statement here and added detailed losses >>>
-            print(f"  Batch [{batch_idx:4d}/{len(dataloader)}] "
-                  f"Loss: {losses['total_loss'].item():.4f} "
-                  f"(Act: {losses['action_loss'].item():.3f}, "
-                  f"Dist: {losses['dist_loss'].item():.3f}, "
-                  f"Seg: {losses['seg_loss'].item():.3f})")
-            if use_wandb:
-                wandb.log({
-                    'train/total_loss': losses['total_loss'].item(),
-                    'train/action_loss': losses['action_loss'].item(),
-                    'train/dist_loss': losses['dist_loss'].item(),
-                    'train/seg_loss': losses['seg_loss'].item(),
-                    'epoch': epoch
-                })
+
+        # <<< MODIFIED: Update logging for the new loss components >>>
+        if use_wandb and (batch_idx % log_freq == 0):
+            log_data = {f'train/{k}': v.item() for k, v in losses.items()}
+            log_data['train/seg_influence'] = outputs.get('seg_influence', 0)
+            log_data['epoch'] = epoch
+            wandb.log(log_data)
 
 def evaluate_and_log(model, test_dataloaders, device, epoch, config, stage):
-    """Helper function to evaluate and log metrics."""
-    model_module = get_model_module(model)
+    """Runs evaluation and logs the navigation metrics."""
     val_loader = next(iter(test_dataloaders.values()))
     
     print(f"\n--- Running evaluation for epoch {epoch} (Stage {stage}) ---")
-    val_metrics = evaluate_segmentation_vint(
-        model, val_loader, device, 
-        num_seg_classes=model_module.num_seg_classes
-    )
+    val_metrics = evaluate_segmentation_vint(model, val_loader, device, config)
     
-    print(f"Validation Metrics: mIoU={val_metrics.get('seg/mIoU', 0):.3f}, fFloor IoU={val_metrics.get('seg/iou_class_0', 0):.3f}, Success Rate={val_metrics.get('nav/success_rate', 0):.3f}, fSPL={val_metrics.get('nav/spl', 0):.3f}")
+    print(f"Validation Metrics: Success={val_metrics['nav/success_rate']:.3f}, "
+          f"Collision={val_metrics['nav/collision_rate']:.3f}, "
+          f"SPL={val_metrics['nav/spl']:.3f}")
     
     if config.get("use_wandb", True):
         log_data = {f"val/{k.replace('/', '_')}": v for k, v in val_metrics.items()}
         log_data.update({'epoch': epoch, 'stage': stage})
         wandb.log(log_data)
-        
-    # Calculate a single score for schedulers and identifying the 'best' model
+    
+    # Define a single validation score for checkpointing (lower is better)
     val_metrics['val_score'] = (
         val_metrics.get('nav/mean_goal_distance', 1.0) * 0.5 +
-        val_metrics.get('nav/collision_rate', 1.0) * 0.3 +
-        (1 - val_metrics.get('nav/spl', 0.0)) * 0.2
+        val_metrics.get('nav/collision_rate', 1.0) * 0.5
     )
-    
     return val_metrics
